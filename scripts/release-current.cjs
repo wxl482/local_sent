@@ -2,6 +2,7 @@
 
 const { execFileSync } = require("child_process");
 const { existsSync, rmSync } = require("fs");
+const { resolve } = require("path");
 
 function resolveTarget() {
   const platform = process.platform;
@@ -37,10 +38,28 @@ function main() {
   if (existsSync(legacyOutput)) {
     rmSync(legacyOutput, { force: true });
   }
+
+  const localPkg = resolve(
+    __dirname,
+    "..",
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "pkg.cmd" : "pkg"
+  );
+  const pkgCommand = existsSync(localPkg)
+    ? [localPkg, []]
+    : [process.platform === "win32" ? "npx.cmd" : "npx", ["--yes", "@yao-pkg/pkg"]];
+
+  const [command, commandPrefix] = pkgCommand;
   console.log(`[release] target=${target}`);
-  execFileSync("pkg", [".", "--targets", target, "--output", `release/${outputName}`], {
-    stdio: "inherit"
-  });
+  console.log(`[release] command=${command}`);
+  execFileSync(
+    command,
+    [...commandPrefix, ".", "--targets", target, "--output", `release/${outputName}`],
+    {
+      stdio: "inherit"
+    }
+  );
 }
 
 main();
