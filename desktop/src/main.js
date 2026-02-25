@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import Swal from "sweetalert2";
 
 markPlatformClass();
 
@@ -61,6 +62,12 @@ const translations = {
     logConfirmAccepted: "已接受传输请求：{name}（来自 {from}）",
     logConfirmRejected: "已拒绝传输请求：{name}（来自 {from}）",
     alertSendDone: "传输完毕",
+    popupTitleInfo: "提示",
+    popupTitleSuccess: "成功",
+    popupTitleError: "错误",
+    popupTitleConfirm: "确认",
+    popupConfirmButton: "确定",
+    popupCancelButton: "取消",
     errorPathRequired: "请先选择文件或目录。",
     useButton: "使用",
     logStartupReady: "应用已启动，等待操作。",
@@ -122,6 +129,12 @@ const translations = {
     logConfirmAccepted: "Accepted transfer request: {name} (from {from})",
     logConfirmRejected: "Rejected transfer request: {name} (from {from})",
     alertSendDone: "Transfer completed",
+    popupTitleInfo: "Notice",
+    popupTitleSuccess: "Success",
+    popupTitleError: "Error",
+    popupTitleConfirm: "Confirm",
+    popupConfirmButton: "OK",
+    popupCancelButton: "Cancel",
     errorPathRequired: "Please pick a file or directory first.",
     useButton: "Use",
     logStartupReady: "Application started and ready.",
@@ -232,6 +245,66 @@ function t(key, vars) {
     const value = vars[name];
     return value === undefined ? `{${name}}` : String(value);
   });
+}
+
+function popupTheme() {
+  return currentTheme === "dark" ? "dark" : "light";
+}
+
+async function showPopup(message, type = "info") {
+  const titleMap = {
+    info: t("popupTitleInfo"),
+    success: t("popupTitleSuccess"),
+    error: t("popupTitleError")
+  };
+
+  await Swal.fire({
+    title: titleMap[type] ?? t("popupTitleInfo"),
+    text: String(message ?? "").trim() || "-",
+    icon: type,
+    confirmButtonText: t("popupConfirmButton"),
+    customClass: {
+      popup: "localsent-swal-popup",
+      title: "localsent-swal-title",
+      confirmButton: "localsent-swal-confirm",
+      cancelButton: "localsent-swal-cancel"
+    },
+    buttonsStyling: false,
+    allowOutsideClick: false,
+    allowEscapeKey: true,
+    background: popupTheme() === "dark" ? "#0c1830" : "#f5faff",
+    color: popupTheme() === "dark" ? "#e6efff" : "#102345"
+  });
+}
+
+async function showConfirmPopup(message) {
+  const result = await Swal.fire({
+    title: t("popupTitleConfirm"),
+    text: String(message ?? "").trim() || "-",
+    icon: "question",
+    showCancelButton: true,
+    confirmButtonText: t("popupConfirmButton"),
+    cancelButtonText: t("popupCancelButton"),
+    customClass: {
+      popup: "localsent-swal-popup",
+      title: "localsent-swal-title",
+      confirmButton: "localsent-swal-confirm",
+      cancelButton: "localsent-swal-cancel"
+    },
+    buttonsStyling: false,
+    allowOutsideClick: false,
+    allowEscapeKey: false,
+    background: popupTheme() === "dark" ? "#0c1830" : "#f5faff",
+    color: popupTheme() === "dark" ? "#e6efff" : "#102345"
+  });
+  return result.isConfirmed;
+}
+
+function toErrorMessage(err) {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return String(err);
 }
 
 function isObject(value) {
@@ -465,14 +538,13 @@ function renderDevices(devices) {
     useBtn.addEventListener("click", () => {
       ui.sendHost.value = device.host;
       ui.sendPort.value = String(device.port);
-      setResult(
-        ui.sendResult,
-        t("resultTargetSelected", {
-          name: device.name,
-          host: device.host,
-          port: device.port
-        })
-      );
+      const message = t("resultTargetSelected", {
+        name: device.name,
+        host: device.host,
+        port: device.port
+      });
+      setResult(ui.sendResult, message);
+      void showPopup(message, "info");
       setActiveView("send");
     });
 
@@ -496,7 +568,9 @@ async function refreshListenState() {
     setListeningUi(state);
   } catch (err) {
     setListeningUi({ running: false });
-    setResult(ui.listenResult, String(err), true);
+    const message = toErrorMessage(err);
+    setResult(ui.listenResult, message, true);
+    await showPopup(message, "error");
   }
 }
 
@@ -524,7 +598,9 @@ async function pickSendPath(kind) {
       refreshSendPathSummary();
     }
   } catch (err) {
-    setResult(ui.sendResult, String(err), true);
+    const message = toErrorMessage(err);
+    setResult(ui.sendResult, message, true);
+    await showPopup(message, "error");
   }
 }
 
@@ -533,10 +609,14 @@ async function pickOutputDirectory() {
     const selectedPath = await invoke("pick_send_path", { kind: "directory" });
     if (typeof selectedPath === "string" && selectedPath.trim()) {
       ui.listenOutput.value = selectedPath;
-      setResult(ui.listenResult, t("resultOutputDirSelected"));
+      const message = t("resultOutputDirSelected");
+      setResult(ui.listenResult, message);
+      await showPopup(message, "success");
     }
   } catch (err) {
-    setResult(ui.listenResult, String(err), true);
+    const message = toErrorMessage(err);
+    setResult(ui.listenResult, message, true);
+    await showPopup(message, "error");
   }
 }
 
@@ -620,10 +700,14 @@ ui.discoverForm.addEventListener("submit", async (event) => {
     const timeoutMs = toPositiveInt(ui.discoverTimeout.value, 3000);
     const devices = await invoke("discover", { timeoutMs });
     renderDevices(devices);
-    setResult(ui.discoverResult, t("resultFoundDevices", { count: devices.length }));
+    const message = t("resultFoundDevices", { count: devices.length });
+    setResult(ui.discoverResult, message);
+    await showPopup(message, "success");
   } catch (err) {
     renderDevices([]);
-    setResult(ui.discoverResult, String(err), true);
+    const message = toErrorMessage(err);
+    setResult(ui.discoverResult, message, true);
+    await showPopup(message, "error");
   } finally {
     ui.discoverBtn.disabled = false;
   }
@@ -643,9 +727,13 @@ ui.listenForm.addEventListener("submit", async (event) => {
 
     const state = await invoke("start_listen", { request });
     setListeningUi(state);
-    setResult(ui.listenResult, t("resultReceiverStarted"));
+    const message = t("resultReceiverStarted");
+    setResult(ui.listenResult, message);
+    await showPopup(message, "success");
   } catch (err) {
-    setResult(ui.listenResult, String(err), true);
+    const message = toErrorMessage(err);
+    setResult(ui.listenResult, message, true);
+    await showPopup(message, "error");
     await refreshListenState();
   } finally {
     ui.startListenBtn.disabled = false;
@@ -659,9 +747,13 @@ ui.stopListenBtn.addEventListener("click", async () => {
   try {
     const state = await invoke("stop_listen");
     setListeningUi(state);
-    setResult(ui.listenResult, t("resultReceiverStopped"));
+    const message = t("resultReceiverStopped");
+    setResult(ui.listenResult, message);
+    await showPopup(message, "success");
   } catch (err) {
-    setResult(ui.listenResult, String(err), true);
+    const message = toErrorMessage(err);
+    setResult(ui.listenResult, message, true);
+    await showPopup(message, "error");
     await refreshListenState();
   }
 });
@@ -687,10 +779,13 @@ ui.sendForm.addEventListener("submit", async (event) => {
     };
 
     const output = await invoke("send_file", { request });
-    setResult(ui.sendResult, t("resultSendDone", { code: output.code }));
-    window.alert(t("alertSendDone"));
+    const resultMessage = t("resultSendDone", { code: output.code });
+    setResult(ui.sendResult, resultMessage);
+    await showPopup(t("alertSendDone"), "success");
   } catch (err) {
-    setResult(ui.sendResult, String(err), true);
+    const message = toErrorMessage(err);
+    setResult(ui.sendResult, message, true);
+    await showPopup(message, "error");
   } finally {
     setSendControlsDisabled(false);
   }
@@ -730,7 +825,7 @@ async function bootstrap() {
     const size = formatBytes(payload.size);
     const name = basenameFromPath(path || "unknown");
 
-    const accepted = window.confirm(
+    const accepted = await showConfirmPopup(
       t("confirmReceivePrompt", {
         from,
         name,
@@ -753,7 +848,9 @@ async function bootstrap() {
         }
       });
     } catch (err) {
-      appendLog("confirm", `confirm response failed: ${String(err)}`);
+      const message = `confirm response failed: ${toErrorMessage(err)}`;
+      appendLog("confirm", message);
+      await showPopup(message, "error");
     }
   });
 

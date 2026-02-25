@@ -924,3 +924,39 @@ button.ghost:hover {
     display: none;
   }
 }
+
+.swal2-popup.localsent-swal-popup {
+  border-radius: 14px !important;
+  border: 1px solid rgba(78, 136, 230, 0.5) !important;
+  box-shadow: 0 16px 36px rgba(4, 16, 37, 0.44), inset 0 1px 0 rgba(158, 203, 255, 0.22) !important;
+  backdrop-filter: blur(10px) saturate(120%);
+  -webkit-backdrop-filter: blur(10px) saturate(120%);
+}
+
+.swal2-title.localsent-swal-title {
+  font-family: var(--font-ui);
+  letter-spacing: 0.02em;
+}
+
+.swal2-confirm.localsent-swal-confirm,
+.swal2-cancel.localsent-swal-cancel {
+  min-width: 90px;
+  border-radius: 10px !important;
+  border: 1px solid transparent !important;
+  font-weight: 700 !important;
+  font-family: var(--font-ui) !important;
+  padding: 0.48rem 0.84rem !important;
+}
+
+.swal2-confirm.localsent-swal-confirm {
+  color: #f2f8ff !important;
+  background: linear-gradient(135deg, var(--primary), var(--primary-strong)) !important;
+  border-color: color-mix(in srgb, var(--primary) 60%, #ffffff 40%) !important;
+  box-shadow: 0 8px 18px rgba(21, 69, 156, 0.28) !important;
+}
+
+.swal2-cancel.localsent-swal-cancel {
+  color: var(--ghost-text) !important;
+  background: var(--ghost-bg) !important;
+  border-color: var(--ghost-border) !important;
+}

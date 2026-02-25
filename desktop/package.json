@@ -15,7 +15,8 @@
     "tauri:build:dmg": "npm run prepare:cli-bin && APPLE_SIGNING_IDENTITY='-' tauri build --bundles dmg"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.8.0"
+    "@tauri-apps/api": "^2.8.0",
+    "sweetalert2": "^11.26.20"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.3",
