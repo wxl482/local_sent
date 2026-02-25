@@ -1210,7 +1210,12 @@ async function bootstrap() {
     if (!isObject(payload)) {
       return;
     }
-    const stream = payload.stream === "stderr" ? "recv-err" : "recv";
+    const stream =
+      payload.stream === "stderr"
+        ? "recv-err"
+        : payload.stream === "system"
+          ? "system"
+          : "recv";
     processLogLine(stream, payload.line ?? "");
   });
 

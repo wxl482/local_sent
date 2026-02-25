@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import { createReadStream, createWriteStream, promises as fsPromises, readFileSync, WriteStream } from "fs";
 import { createConnection, createServer, Server, Socket } from "net";
-import { dirname, resolve } from "path";
+import { basename, dirname, extname, resolve } from "path";
 import { once } from "events";
 import { finished } from "stream/promises";
 import { connect as tlsConnect, createServer as createTlsServer, Server as TlsServer, TLSSocket } from "tls";
@@ -101,6 +101,11 @@ interface ProgressEmitState {
   startedAt: number;
   lastEmitAt: number;
   lastPercent: number;
+}
+
+interface ReceivePathSelection {
+  finalPath: string;
+  tempPath: string;
 }
 
 class SocketReader {
@@ -460,6 +465,7 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
   const reader = new SocketReader(socket);
   let header: TransferHeader | null = null;
   let targetPath = "";
+  let tempPath = "";
   let fileStream: WriteStream | null = null;
   let phase: ReceiverPhase = "before-ready";
   let failed = false;
@@ -481,9 +487,9 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
       fileStream.destroy();
     }
 
-    if (cleanup && targetPath) {
+    if (cleanup && tempPath) {
       try {
-        await fsPromises.rm(targetPath, { force: true });
+        await fsPromises.rm(tempPath, { force: true });
       } catch {
         // Ignore cleanup failures.
       }
@@ -537,7 +543,13 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
       return;
     }
 
-    targetPath = resolveOutputPath(outputDir, header.relativePath);
+    const receivePathSelection = await selectReceivePaths({
+      outputDir,
+      relativePath: header.relativePath,
+      expectedSha256: header.sha256
+    });
+    targetPath = receivePathSelection.finalPath;
+    tempPath = receivePathSelection.tempPath;
     await fsPromises.mkdir(dirname(targetPath), { recursive: true });
 
     if (listenOptions.confirmTransfer) {
@@ -558,7 +570,7 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
     }
 
     resumedFrom = await decideResumeOffset({
-      targetPath,
+      targetPath: tempPath,
       expectedSha256: header.sha256,
       expectedSize: header.fileSize,
       hasher
@@ -567,7 +579,7 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
     const recvProgressState = createProgressEmitState(`[recv ${header.relativePath}]`, header.fileSize, startedAt);
 
     if (resumedFrom < header.fileSize) {
-      fileStream = createWriteStream(targetPath, resumedFrom > 0 ? { flags: "r+", start: resumedFrom } : { flags: "w" });
+      fileStream = createWriteStream(tempPath, resumedFrom > 0 ? { flags: "r+", start: resumedFrom } : { flags: "w" });
       fileStream.on("error", () => {
         void fail("cannot write target file");
       });
@@ -619,6 +631,7 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
       await fail("sha256 mismatch", true);
       return;
     }
+    const savedPath = await promoteReceivedFile(tempPath, targetPath);
 
     phase = "done";
     let nextPairCode: string | undefined;
@@ -639,12 +652,12 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
         ok: true,
         sha256: digest,
         receivedBytes: received,
-        savedPath: targetPath,
+        savedPath,
         resumedFrom,
         nextPairCode
       } satisfies AckMessage)
     );
-    process.stdout.write(`[receive] saved ${targetPath}\n`);
+    process.stdout.write(`[receive] saved ${savedPath}\n`);
   } catch (err) {
     await fail((err as Error).message);
   } finally {
@@ -662,6 +675,93 @@ function normalizeRemoteAddress(raw: string | undefined): string {
     return value.slice("::ffff:".length);
   }
   return value;
+}
+
+const TEMP_SUFFIX = ".local-sent.part";
+const MAX_DUPLICATE_SUFFIX_ATTEMPTS = 10_000;
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fsPromises.stat(filePath);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw err;
+  }
+}
+
+function duplicatePathWithIndex(basePath: string, index: number): string {
+  if (index <= 0) {
+    return basePath;
+  }
+  const dir = dirname(basePath);
+  const fileName = basename(basePath);
+  const extension = extname(fileName);
+  const stem = extension ? fileName.slice(0, -extension.length) : fileName;
+  return resolve(dir, `${stem}(${index})${extension}`);
+}
+
+function buildReceiveTempPath(finalPath: string, expectedSha256: string): string {
+  const tag = expectedSha256.slice(0, 16).toLowerCase();
+  return `${finalPath}.${tag}${TEMP_SUFFIX}`;
+}
+
+async function selectReceivePaths(args: {
+  outputDir: string;
+  relativePath: string;
+  expectedSha256: string;
+}): Promise<ReceivePathSelection> {
+  const { outputDir, relativePath, expectedSha256 } = args;
+  const basePath = resolveOutputPath(outputDir, relativePath);
+
+  for (let index = 0; index < MAX_DUPLICATE_SUFFIX_ATTEMPTS; index += 1) {
+    const candidateFinalPath = duplicatePathWithIndex(basePath, index);
+    const candidateTempPath = buildReceiveTempPath(candidateFinalPath, expectedSha256);
+
+    if (await pathExists(candidateTempPath)) {
+      return {
+        finalPath: candidateFinalPath,
+        tempPath: candidateTempPath
+      };
+    }
+
+    if (!(await pathExists(candidateFinalPath))) {
+      return {
+        finalPath: candidateFinalPath,
+        tempPath: candidateTempPath
+      };
+    }
+  }
+
+  throw new Error("failed to allocate receive target path");
+}
+
+async function promoteReceivedFile(tempPath: string, preferredFinalPath: string): Promise<string> {
+  for (let index = 0; index < MAX_DUPLICATE_SUFFIX_ATTEMPTS; index += 1) {
+    const candidateFinalPath = duplicatePathWithIndex(preferredFinalPath, index);
+    try {
+      await fsPromises.rename(tempPath, candidateFinalPath);
+      return candidateFinalPath;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        throw new Error("temporary receive file is missing");
+      }
+      if (code === "EXDEV") {
+        await fsPromises.copyFile(tempPath, candidateFinalPath);
+        await fsPromises.rm(tempPath, { force: true });
+        return candidateFinalPath;
+      }
+      if (code === "EEXIST" || code === "ENOTEMPTY") {
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw new Error("failed to choose final receive file path");
 }
 
 async function decideResumeOffset(args: {
