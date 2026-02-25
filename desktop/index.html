@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Sent Desktop</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="background-shape shape-a"></div>
+    <div class="background-shape shape-b"></div>
+
+    <main class="app-shell">
+      <aside class="sidebar-shell">
+        <div class="sidebar">
+          <button id="navSendBtn" type="button" class="nav-item active">
+            <span class="nav-icon nav-icon-send" aria-hidden="true"></span>
+            <span class="nav-label" data-i18n="navSend">Send</span>
+          </button>
+          <button id="navReceiveBtn" type="button" class="nav-item">
+            <span class="nav-icon nav-icon-receive" aria-hidden="true"></span>
+            <span class="nav-label" data-i18n="navReceive">Receive</span>
+          </button>
+        </div>
+      </aside>
+
+      <section class="main-stage">
+        <header class="topbar">
+          <div class="header-actions">
+            <label class="theme-select">
+              <span data-i18n="themeLabel">Theme</span>
+              <select id="themeSelect">
+                <option value="light" data-i18n="themeLight">Light</option>
+                <option value="dark" data-i18n="themeDark">Dark</option>
+              </select>
+            </label>
+            <label class="lang-select">
+              <span data-i18n="languageLabel">Language</span>
+              <select id="languageSelect">
+                <option value="zh">中文</option>
+                <option value="en">English</option>
+              </select>
+            </label>
+            <div id="listenState" class="state-chip offline">Receiver Offline</div>
+          </div>
+        </header>
+
+        <section class="content">
+          <div id="sendView" class="view is-active">
+            <article class="card">
+              <h2 data-i18n="discoverTitle">Discover</h2>
+              <form id="discoverForm" class="stack">
+                <label>
+                  <span data-i18n="discoverTimeoutLabel">Timeout (ms)</span>
+                  <input id="discoverTimeout" type="number" min="100" step="100" value="3000" />
+                </label>
+                <button id="discoverBtn" type="submit" data-i18n="discoverButton">Scan LAN</button>
+              </form>
+              <div id="discoverResult" class="muted"></div>
+              <div id="deviceList" class="device-list"></div>
+            </article>
+
+            <article class="card">
+              <h2 data-i18n="sendTitle">Send</h2>
+              <form id="sendForm" class="stack">
+                <label>
+                  <span data-i18n="sendPathKindLabel">Send Type</span>
+                  <select id="sendPathKind">
+                    <option value="file" data-i18n="sendPathKindFile">File</option>
+                    <option value="directory" data-i18n="sendPathKindDirectory">Directory</option>
+                  </select>
+                </label>
+                <label>
+                  <span data-i18n="sendPathLabel">File / Directory</span>
+                  <div class="picker-summary-row">
+                    <div
+                      id="sendPathSummary"
+                      class="picker-summary picker-summary-action"
+                      role="button"
+                      tabindex="0"
+                      data-i18n="sendPathEmpty"
+                    >
+                      Click to pick file or directory.
+                    </div>
+                    <button
+                      id="clearSendPathBtn"
+                      type="button"
+                      class="picker-clear-btn is-hidden"
+                      aria-label="Clear selection"
+                      title="Clear selection"
+                    >
+                      x
+                    </button>
+                  </div>
+                </label>
+                <label>
+                  <span data-i18n="sendHostLabel">Host (optional)</span>
+                  <input
+                    id="sendHost"
+                    type="text"
+                    data-i18n-placeholder="sendHostPlaceholder"
+                    placeholder="192.168.1.10"
+                  />
+                </label>
+                <label>
+                  <span data-i18n="sendPortLabel">Port</span>
+                  <input id="sendPort" type="number" min="1" max="65535" value="37373" />
+                </label>
+                <label>
+                  <span data-i18n="sendPairLabel">Pair Code (optional)</span>
+                  <input
+                    id="sendPairCode"
+                    type="text"
+                    maxlength="6"
+                    data-i18n-placeholder="sendPairPlaceholder"
+                    placeholder="123456"
+                  />
+                </label>
+                <button id="sendBtn" type="submit" data-i18n="sendButton">Send Now</button>
+              </form>
+              <div id="sendResult" class="muted"></div>
+            </article>
+          </div>
+
+          <div id="receiveView" class="view">
+            <article class="card">
+              <h2 data-i18n="receiverTitle">Receiver</h2>
+              <form id="listenForm" class="stack">
+                <label>
+                  <span data-i18n="receiverPortLabel">Port</span>
+                  <input id="listenPort" type="number" min="1" max="65535" value="37373" />
+                </label>
+                <label>
+                  <span data-i18n="receiverOutputLabel">Output Directory</span>
+                  <input
+                    id="listenOutput"
+                    type="text"
+                    data-i18n-placeholder="receiverOutputPlaceholder"
+                    placeholder="~/Downloads"
+                  />
+                </label>
+                <div class="inline-actions">
+                  <button id="pickOutputDirBtn" type="button" class="ghost" data-i18n="pickOutputDirButton">
+                    Pick Output Directory
+                  </button>
+                </div>
+                <label>
+                  <span data-i18n="receiverNameLabel">Device Name</span>
+                  <input
+                    id="listenName"
+                    type="text"
+                    data-i18n-placeholder="receiverNamePlaceholder"
+                    placeholder="local-sent-my-device"
+                  />
+                </label>
+                <div class="inline-actions">
+                  <button id="startListenBtn" type="submit" data-i18n="receiverStartButton">Start Receiver</button>
+                  <button id="stopListenBtn" type="button" class="ghost" data-i18n="receiverStopButton">Stop</button>
+                </div>
+              </form>
+              <div id="listenResult" class="muted"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="logs-wrap">
+          <article class="card">
+            <h2 data-i18n="logsTitle">Logs</h2>
+            <pre id="logPane" class="log-pane"></pre>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

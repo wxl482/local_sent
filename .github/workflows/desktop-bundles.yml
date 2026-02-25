@@ -1,0 +1,85 @@
+name: Desktop Bundles
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-bundles-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Bundle (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            os: macos-latest
+            bundle: dmg
+          - platform: windows
+            os: windows-latest
+            bundle: nsis
+          - platform: linux
+            os: ubuntu-latest
+            bundle: appimage
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install desktop dependencies
+        run: npm --prefix desktop ci
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            build-essential \
+            curl \
+            wget \
+            file
+
+      - name: Build desktop bundle (macOS ad-hoc signed)
+        if: matrix.platform == 'macos'
+        run: |
+          APPLE_SIGNING_IDENTITY="-" \
+          npm --prefix desktop run tauri:build -- --bundles ${{ matrix.bundle }}
+
+      - name: Build desktop bundle
+        if: matrix.platform != 'macos'
+        run: npm --prefix desktop run tauri:build -- --bundles ${{ matrix.bundle }}
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}-${{ matrix.bundle }}
+          path: desktop/src-tauri/target/release/bundle/${{ matrix.bundle }}/**/*
+          if-no-files-found: error
+          retention-days: 14

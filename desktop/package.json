@@ -1,0 +1,24 @@
+{
+  "name": "local-sent-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420",
+    "build": "vite build --outDir dist-web",
+    "preview": "vite preview --host 127.0.0.1 --port 1421",
+    "build:cli": "npm --prefix .. run build",
+    "prepare:cli-bin": "npm --prefix .. run release:current && node ./scripts/prepare-cli-bin.mjs",
+    "tauri": "tauri",
+    "tauri:dev": "npm run build:cli && tauri dev",
+    "tauri:build": "npm run prepare:cli-bin && tauri build",
+    "tauri:build:dmg": "npm run prepare:cli-bin && APPLE_SIGNING_IDENTITY='-' tauri build --bundles dmg"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.3",
+    "vite": "^5.4.11"
+  }
+}

@@ -1,0 +1,9 @@
+node_modules
+dist
+release
+desktop/dist-web
+desktop/dist-bundles
+desktop/src-tauri/target
+desktop/src-tauri/bin/local_sent_cli
+.codex
+.DS_Store

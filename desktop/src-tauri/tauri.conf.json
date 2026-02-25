@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Local Sent Desktop",
+  "version": "0.1.0",
+  "identifier": "com.wxl.localsent.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../dist-web"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Local Sent Desktop",
+        "width": 1200,
+        "height": 820,
+        "minWidth": 1200,
+        "minHeight": 820,
+        "transparent": false,
+        "resizable": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 26
+        },
+        "backgroundColor": "#ffffff"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "resources": [
+      "bin/*"
+    ]
+  }
+}
