@@ -336,8 +336,11 @@ function formatBytes(bytes) {
 }
 
 function setResult(target, message, isError = false) {
-  target.textContent = message;
-  target.classList.toggle("error", isError);
+  if (!target) {
+    return;
+  }
+  target.textContent = "";
+  target.classList.remove("error");
 }
 
 function setActiveView(view) {
@@ -517,10 +520,6 @@ function setSendControlsDisabled(disabled) {
 function renderDevices(devices) {
   ui.deviceList.innerHTML = "";
   if (!devices.length) {
-    const empty = document.createElement("div");
-    empty.className = "muted";
-    empty.textContent = t("resultNoReceiver");
-    ui.deviceList.append(empty);
     return;
   }
 

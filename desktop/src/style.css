@@ -746,6 +746,12 @@ button.ghost:hover {
   color: var(--muted);
 }
 
+#discoverResult,
+#listenResult,
+#sendResult {
+  display: none !important;
+}
+
 .muted.error {
   color: var(--danger);
 }
