@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
-use tauri::{AppHandle, Emitter, State};
+use tauri::path::BaseDirectory;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Default)]
 struct AppState {
@@ -623,6 +624,18 @@ fn bundled_cli_binary_name() -> &'static str {
   }
 }
 
+fn bundled_cli_binary_name_candidates() -> &'static [&'static str] {
+  if cfg!(target_os = "windows") {
+    &[
+      "local_sent_cli.exe",
+      "local_sent_cli-x86_64-pc-windows-msvc.exe",
+      "local_sent_cli-aarch64-pc-windows-msvc.exe",
+    ]
+  } else {
+    &["local_sent_cli"]
+  }
+}
+
 fn host_release_binary_name() -> &'static str {
   if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
     "local_sent-macos-arm64"
@@ -660,9 +673,34 @@ fn project_root() -> Result<PathBuf, String> {
   Ok(root_dir.to_path_buf())
 }
 
+fn configure_bundled_cli_env(app: &tauri::AppHandle) {
+  for name in bundled_cli_binary_name_candidates() {
+    if let Ok(path) = app.path().resolve(format!("bin/{name}"), BaseDirectory::Resource) {
+      if path.exists() {
+        unsafe {
+          std::env::set_var("LOCAL_SENT_CLI_PATH", path);
+        }
+        return;
+      }
+    }
+    if let Ok(path) = app.path().resolve(name.to_string(), BaseDirectory::Resource) {
+      if path.exists() {
+        unsafe {
+          std::env::set_var("LOCAL_SENT_CLI_PATH", path);
+        }
+        return;
+      }
+    }
+  }
+}
+
 fn main() {
   tauri::Builder::default()
     .manage(AppState::default())
+    .setup(|app| {
+      configure_bundled_cli_env(app.handle());
+      Ok(())
+    })
     .invoke_handler(tauri::generate_handler![
       discover,
       send_file,

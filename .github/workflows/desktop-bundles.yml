@@ -75,10 +75,45 @@ jobs:
         if: matrix.platform != 'macos'
         run: npm --prefix desktop run tauri:build -- --bundles ${{ matrix.bundle }}
 
+      - name: Build Windows portable zip (no installer)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $releaseDir = "desktop/src-tauri/target/release"
+          $portableDir = Join-Path $releaseDir "portable"
+          $portableZip = Join-Path $releaseDir "bundle/local_sent_desktop-windows-portable.zip"
+
+          if (Test-Path $portableDir) {
+            Remove-Item -Recurse -Force $portableDir
+          }
+          New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
+
+          Copy-Item (Join-Path $releaseDir "local_sent_desktop.exe") $portableDir -Force
+          if (Test-Path (Join-Path $releaseDir "resources")) {
+            Copy-Item (Join-Path $releaseDir "resources") (Join-Path $portableDir "resources") -Recurse -Force
+          }
+          if (Test-Path (Join-Path $releaseDir "WebView2Loader.dll")) {
+            Copy-Item (Join-Path $releaseDir "WebView2Loader.dll") $portableDir -Force
+          }
+
+          if (Test-Path $portableZip) {
+            Remove-Item -Force $portableZip
+          }
+          Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $portableZip -Force
+
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.platform }}-${{ matrix.bundle }}
           path: desktop/src-tauri/target/release/bundle/${{ matrix.bundle }}/**/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Windows portable artifact
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-portable-zip
+          path: desktop/src-tauri/target/release/bundle/local_sent_desktop-windows-portable.zip
           if-no-files-found: error
           retention-days: 14
