@@ -2,7 +2,7 @@
 
 import { randomInt } from "crypto";
 import { Command } from "commander";
-import { hostname } from "os";
+import { hostname, networkInterfaces } from "os";
 import { resolve } from "path";
 import { DEFAULT_DISCOVERY_TIMEOUT_MS, DEFAULT_PORT } from "./constants";
 import { runDoctor } from "./doctor";
@@ -34,6 +34,58 @@ function normalizePairCode(value: string): string {
 
 function generatePairCode(): string {
   return randomInt(0, 1_000_000).toString().padStart(6, "0");
+}
+
+function resolveListenEndpointHost(): string {
+  const interfaces = networkInterfaces();
+  const candidates: Array<{ name: string; address: string }> = [];
+
+  for (const [name, items] of Object.entries(interfaces)) {
+    for (const item of items ?? []) {
+      if (item.family === "IPv4" && !item.internal) {
+        candidates.push({ name, address: item.address });
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    return "127.0.0.1";
+  }
+
+  const interfacePenalty = (name: string): number => {
+    const value = name.toLowerCase();
+    if (value.includes("docker") || value.includes("vbox") || value.includes("vmnet") || value.includes("wsl")) {
+      return 10;
+    }
+    if (value.includes("tailscale") || value.includes("utun")) {
+      return 20;
+    }
+    return 0;
+  };
+
+  const addressPenalty = (address: string): number => {
+    if (address.startsWith("192.168.")) {
+      return 0;
+    }
+    if (address.startsWith("10.")) {
+      return 1;
+    }
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(address)) {
+      return 2;
+    }
+    return 5;
+  };
+
+  candidates.sort((a, b) => {
+    const scoreA = interfacePenalty(a.name) + addressPenalty(a.address);
+    const scoreB = interfacePenalty(b.name) + addressPenalty(b.address);
+    if (scoreA !== scoreB) {
+      return scoreA - scoreB;
+    }
+    return a.name.localeCompare(b.name);
+  });
+
+  return candidates[0].address;
 }
 
 const program = new Command();
@@ -201,7 +253,8 @@ program
       });
 
       console.log(t("listen_service", { service: serviceName }));
-      console.log(t("listen_endpoint", { port: opts.port }));
+      const listenHost = resolveListenEndpointHost();
+      console.log(t("listen_endpoint", { host: listenHost, port: opts.port }));
       console.log(t("listen_output", { output: outputDir }));
       if (pairCode) {
         const ttlSuffix = opts.pairTtl ? ` valid-for=${opts.pairTtl}s` : "";
@@ -213,8 +266,6 @@ program
       if (opts.tlsCert) {
         console.log(t("listen_tls_enabled"));
       }
-      console.log(t("listen_press_ctrl_c"));
-
       let stopped = false;
       const shutdown = async (signal: string): Promise<void> => {
         if (stopped) {

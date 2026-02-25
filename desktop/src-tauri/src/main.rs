@@ -631,6 +631,20 @@ fn bundled_cli_binary_name_candidates() -> &'static [&'static str] {
       "local_sent_cli-x86_64-pc-windows-msvc.exe",
       "local_sent_cli-aarch64-pc-windows-msvc.exe",
     ]
+  } else if cfg!(target_os = "linux") {
+    &[
+      "local_sent_cli",
+      "local_sent_cli-x86_64-unknown-linux-gnu",
+      "local_sent_cli-aarch64-unknown-linux-gnu",
+      "local_sent_cli-x86_64-unknown-linux-musl",
+      "local_sent_cli-aarch64-unknown-linux-musl",
+    ]
+  } else if cfg!(target_os = "macos") {
+    &[
+      "local_sent_cli",
+      "local_sent_cli-aarch64-apple-darwin",
+      "local_sent_cli-x86_64-apple-darwin",
+    ]
   } else {
     &["local_sent_cli"]
   }
