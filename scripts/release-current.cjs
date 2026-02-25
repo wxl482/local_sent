@@ -39,23 +39,20 @@ function main() {
     rmSync(legacyOutput, { force: true });
   }
 
-  const localPkg = resolve(
-    __dirname,
-    "..",
-    "node_modules",
-    ".bin",
-    process.platform === "win32" ? "pkg.cmd" : "pkg"
-  );
-  const pkgCommand = existsSync(localPkg)
-    ? [localPkg, []]
-    : [process.platform === "win32" ? "npx.cmd" : "npx", ["--yes", "@yao-pkg/pkg"]];
+  const pkgBinCandidates = [
+    resolve(__dirname, "..", "node_modules", "@yao-pkg", "pkg", "lib-es5", "bin.js"),
+    resolve(__dirname, "..", "node_modules", "pkg", "lib-es5", "bin.js")
+  ];
+  const pkgBin = pkgBinCandidates.find((candidate) => existsSync(candidate));
+  if (!pkgBin) {
+    throw new Error("pkg binary script not found. Run npm ci first.");
+  }
 
-  const [command, commandPrefix] = pkgCommand;
   console.log(`[release] target=${target}`);
-  console.log(`[release] command=${command}`);
+  console.log(`[release] command=${process.execPath} ${pkgBin}`);
   execFileSync(
-    command,
-    [...commandPrefix, ".", "--targets", target, "--output", `release/${outputName}`],
+    process.execPath,
+    [pkgBin, ".", "--targets", target, "--output", `release/${outputName}`],
     {
       stdio: "inherit"
     }
