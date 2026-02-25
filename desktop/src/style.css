@@ -524,6 +524,10 @@ h1 {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
+#receiveView.is-active {
+  grid-template-columns: minmax(0, clamp(560px, 62vw, 720px));
+}
+
 .card {
   position: relative;
   background: var(--card);
@@ -888,6 +892,10 @@ button.ghost:hover {
 
   .logs-wrap {
     padding: var(--right-logs-top-gap) 0 0;
+  }
+
+  #receiveView.is-active {
+    grid-template-columns: 1fr;
   }
 }
 
