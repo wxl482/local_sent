@@ -207,7 +207,7 @@ program
   .action(
     async (opts: { port: number; output: string; name?: string; pairCode?: string; pairGenerate?: boolean; pairOnce?: boolean; pairTtl?: number; tlsCert?: string; tlsKey?: string }) => {
       const outputDir = resolve(opts.output);
-      const serviceName = opts.name ?? `local-sent-${hostname()}`;
+      const serviceName = opts.name ?? hostname();
       if ((opts.tlsCert && !opts.tlsKey) || (!opts.tlsCert && opts.tlsKey)) {
         throw new Error(t("err_tls_cert_key_together"));
       }
