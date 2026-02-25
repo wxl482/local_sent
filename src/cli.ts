@@ -4,6 +4,7 @@ import { randomInt } from "crypto";
 import { Command } from "commander";
 import { hostname, networkInterfaces } from "os";
 import { resolve } from "path";
+import { createInterface } from "readline";
 import { DEFAULT_DISCOVERY_TIMEOUT_MS, DEFAULT_PORT } from "./constants";
 import { runDoctor } from "./doctor";
 import { discoverDevices } from "./discovery";
@@ -86,6 +87,62 @@ function resolveListenEndpointHost(): string {
   });
 
   return candidates[0].address;
+}
+
+function createConfirmController() {
+  const pending = new Map<number, (accept: boolean) => void>();
+  let nextId = 0;
+  const readline = createInterface({
+    input: process.stdin,
+    terminal: false
+  });
+
+  readline.on("line", (line) => {
+    const trimmed = String(line).trim();
+    if (!trimmed) {
+      return;
+    }
+    const match = /^(approve|reject)\s+(\d+)$/i.exec(trimmed);
+    if (!match) {
+      return;
+    }
+    const [, action, rawId] = match;
+    const id = Number.parseInt(rawId, 10);
+    const resolver = pending.get(id);
+    if (!resolver) {
+      return;
+    }
+    pending.delete(id);
+    resolver(action.toLowerCase() === "approve");
+  });
+
+  const request = (args: { from: string; path: string; size: number }): Promise<boolean> => {
+    const id = ++nextId;
+    console.log(
+      `[confirm-request] ${JSON.stringify({
+        id,
+        from: args.from,
+        path: args.path,
+        size: args.size
+      })}`
+    );
+    return new Promise<boolean>((resolve) => {
+      pending.set(id, resolve);
+    });
+  };
+
+  const close = (): void => {
+    for (const resolvePending of pending.values()) {
+      resolvePending(false);
+    }
+    pending.clear();
+    readline.close();
+  };
+
+  return {
+    request,
+    close
+  };
 }
 
 const program = new Command();
@@ -204,8 +261,9 @@ program
   )
   .option("--tls-cert <path>", t("listen_tls_cert_option"))
   .option("--tls-key <path>", t("listen_tls_key_option"))
+  .option("--confirm-each", t("listen_confirm_each_option"))
   .action(
-    async (opts: { port: number; output: string; name?: string; pairCode?: string; pairGenerate?: boolean; pairOnce?: boolean; pairTtl?: number; tlsCert?: string; tlsKey?: string }) => {
+    async (opts: { port: number; output: string; name?: string; pairCode?: string; pairGenerate?: boolean; pairOnce?: boolean; pairTtl?: number; tlsCert?: string; tlsKey?: string; confirmEach?: boolean }) => {
       const outputDir = resolve(opts.output);
       const serviceName = opts.name ?? hostname();
       if ((opts.tlsCert && !opts.tlsKey) || (!opts.tlsCert && opts.tlsKey)) {
@@ -229,6 +287,8 @@ program
             ? generatePairCode()
             : undefined;
 
+      const confirmController = opts.confirmEach ? createConfirmController() : null;
+
       const stop = await startReceiver({
         port: opts.port,
         outputDir,
@@ -249,6 +309,16 @@ program
             );
           }
         },
+        confirmTransfer: confirmController
+          ? async ({ from, relativePath, fileSize }) => {
+              const accepted = await confirmController.request({
+                from,
+                path: relativePath,
+                size: fileSize
+              });
+              return { accept: accepted };
+            }
+          : undefined,
         tls: opts.tlsCert && opts.tlsKey ? { certPath: resolve(opts.tlsCert), keyPath: resolve(opts.tlsKey) } : undefined
       });
 
@@ -273,6 +343,7 @@ program
         }
         stopped = true;
         console.log(t("listen_shutdown", { signal }));
+        confirmController?.close();
         await stop();
         process.exit(0);
       };
@@ -399,6 +470,12 @@ program
           resumed: formatBytes(batch.resumedBytes)
         })
       );
+
+      for (const item of batch.results) {
+        if (item.ack.savedPath) {
+          console.log(t("send_saved_path", { savedPath: item.ack.savedPath }));
+        }
+      }
     }
   );
 

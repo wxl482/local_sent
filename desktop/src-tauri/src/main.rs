@@ -4,9 +4,9 @@ use if_addrs::get_if_addrs;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use tauri::path::BaseDirectory;
@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[derive(Default)]
 struct AppState {
   listen_child: Mutex<Option<Child>>,
+  listen_stdin: Mutex<Option<ChildStdin>>,
   listen_port: Mutex<Option<u16>>,
 }
 
@@ -94,6 +95,31 @@ struct SendRequest {
   tls_fingerprint: Option<String>,
   tls_tofu: Option<bool>,
   tls_known_hosts: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferConfirmResponse {
+  id: u64,
+  accept: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CliConfirmRequest {
+  id: u64,
+  from: Option<String>,
+  path: String,
+  size: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferConfirmRequestPayload {
+  id: u64,
+  from: String,
+  path: String,
+  size: u64,
 }
 
 #[tauri::command]
@@ -250,15 +276,18 @@ fn start_listen(
     args.push("--tls-key".to_string());
     args.push(key_path);
   }
+  args.push("--confirm-each".to_string());
 
   let mut command = build_cli_command(&args)?;
   let mut child = command
+    .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .spawn()
     .map_err(|err| format!("failed to start listen process: {err}"))?;
 
   let pid = child.id();
+  let child_stdin = child.stdin.take();
   if let Some(stdout) = child.stdout.take() {
     spawn_log_reader(stdout, "stdout", app.clone());
   }
@@ -268,6 +297,13 @@ fn start_listen(
 
   *guard = Some(child);
   drop(guard);
+
+  let mut stdin_guard = state
+    .listen_stdin
+    .lock()
+    .map_err(|_| "failed to lock listen stdin state".to_string())?;
+  *stdin_guard = child_stdin;
+  drop(stdin_guard);
 
   let mut listen_port = state
     .listen_port
@@ -297,6 +333,13 @@ fn stop_listen(app: AppHandle, state: State<AppState>) -> Result<ListenStatePayl
   }
   drop(guard);
 
+  let mut stdin_guard = state
+    .listen_stdin
+    .lock()
+    .map_err(|_| "failed to lock listen stdin state".to_string())?;
+  *stdin_guard = None;
+  drop(stdin_guard);
+
   let mut listen_port = state
     .listen_port
     .lock()
@@ -310,6 +353,29 @@ fn stop_listen(app: AppHandle, state: State<AppState>) -> Result<ListenStatePayl
   };
   let _ = app.emit("listen-state", payload.clone());
   Ok(payload)
+}
+
+#[tauri::command]
+fn respond_transfer_confirm(
+  state: State<AppState>,
+  response: TransferConfirmResponse,
+) -> Result<(), String> {
+  let mut stdin_guard = state
+    .listen_stdin
+    .lock()
+    .map_err(|_| "failed to lock listen stdin state".to_string())?;
+
+  let stdin = stdin_guard
+    .as_mut()
+    .ok_or_else(|| "listen process is not running".to_string())?;
+
+  let action = if response.accept { "approve" } else { "reject" };
+  writeln!(stdin, "{action} {}", response.id)
+    .map_err(|err| format!("failed to write confirm response: {err}"))?;
+  stdin
+    .flush()
+    .map_err(|err| format!("failed to flush confirm response: {err}"))?;
+  Ok(())
 }
 
 #[tauri::command]
@@ -328,6 +394,18 @@ where
   thread::spawn(move || {
     let line_reader = BufReader::new(reader);
     for line in line_reader.lines().map_while(Result::ok) {
+      if stream == "stdout" {
+        if let Some(request) = parse_confirm_request(&line) {
+          let payload = TransferConfirmRequestPayload {
+            id: request.id,
+            from: request.from.unwrap_or_else(|| "unknown".to_string()),
+            path: request.path,
+            size: request.size,
+          };
+          let _ = app.emit("transfer-confirm-request", payload);
+          continue;
+        }
+      }
       let payload = ListenLogPayload {
         stream: stream.to_string(),
         line,
@@ -335,6 +413,12 @@ where
       let _ = app.emit("listen-log", payload);
     }
   });
+}
+
+fn parse_confirm_request(line: &str) -> Option<CliConfirmRequest> {
+  const PREFIX: &str = "[confirm-request] ";
+  let raw = line.strip_prefix(PREFIX)?;
+  serde_json::from_str::<CliConfirmRequest>(raw).ok()
 }
 
 fn inspect_listen_state(state: &State<AppState>) -> Result<ListenStateSnapshot, String> {
@@ -359,6 +443,12 @@ fn inspect_listen_state(state: &State<AppState>) -> Result<ListenStateSnapshot, 
   };
 
   if !running {
+    let mut listen_stdin = state
+      .listen_stdin
+      .lock()
+      .map_err(|_| "failed to lock listen stdin state".to_string())?;
+    *listen_stdin = None;
+
     let mut listen_port = state
       .listen_port
       .lock()
@@ -553,16 +643,28 @@ fn build_cli_command(args: &[String]) -> Result<Command, String> {
     CliRuntime::Binary(path) => {
       let mut command = Command::new(path);
       command.args(args);
+      configure_cli_command_for_platform(&mut command);
       Ok(command)
     }
     CliRuntime::NodeScript(path) => {
       let root = project_root()?;
       let mut command = Command::new("node");
       command.arg(path).args(args).current_dir(root);
+      configure_cli_command_for_platform(&mut command);
       Ok(command)
     }
   }
 }
+
+#[cfg(target_os = "windows")]
+fn configure_cli_command_for_platform(command: &mut Command) {
+  use std::os::windows::process::CommandExt;
+  const CREATE_NO_WINDOW: u32 = 0x08000000;
+  command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_cli_command_for_platform(_command: &mut Command) {}
 
 fn resolve_cli_runtime() -> Result<CliRuntime, String> {
   if let Some(path) = std::env::var_os("LOCAL_SENT_CLI_PATH").map(PathBuf::from) {
@@ -590,38 +692,15 @@ fn resolve_cli_runtime() -> Result<CliRuntime, String> {
 }
 
 fn bundled_cli_binary_path() -> Option<PathBuf> {
-  let exe = std::env::current_exe().ok()?;
-  let exe_dir = exe.parent()?;
-  let mut candidates = Vec::new();
-  let bin_name = bundled_cli_binary_name();
-
-  candidates.push(exe_dir.join("resources").join("bin").join(bin_name));
-  candidates.push(exe_dir.join("resources").join(bin_name));
-
-  if let Some(contents_dir) = exe_dir.parent() {
-    candidates.push(contents_dir.join("Resources").join("bin").join(bin_name));
-    candidates.push(contents_dir.join("Resources").join(bin_name));
-  }
-
-  if let Some(resources_dir) = exe_dir.ancestors().find(|path| path.ends_with("Resources")) {
-    candidates.push(resources_dir.join("bin").join(bin_name));
-  }
-
-  candidates.into_iter().find(|path| path.exists())
+  bundled_cli_binary_candidates_from_exe()
+    .into_iter()
+    .find(|path| path.exists())
 }
 
 fn release_cli_binary_path() -> Option<PathBuf> {
   let root = project_root().ok()?;
   let path = root.join("release").join(host_release_binary_name());
   path.exists().then_some(path)
-}
-
-fn bundled_cli_binary_name() -> &'static str {
-  if cfg!(target_os = "windows") {
-    "local_sent_cli.exe"
-  } else {
-    "local_sent_cli"
-  }
 }
 
 fn bundled_cli_binary_name_candidates() -> &'static [&'static str] {
@@ -648,6 +727,36 @@ fn bundled_cli_binary_name_candidates() -> &'static [&'static str] {
   } else {
     &["local_sent_cli"]
   }
+}
+
+fn bundled_cli_binary_candidates_from_exe() -> Vec<PathBuf> {
+  let mut candidates = Vec::new();
+  let exe = match std::env::current_exe() {
+    Ok(path) => path,
+    Err(_) => return candidates,
+  };
+  let Some(exe_dir) = exe.parent() else {
+    return candidates;
+  };
+
+  for name in bundled_cli_binary_name_candidates() {
+    candidates.push(exe_dir.join("bin").join(name));
+    candidates.push(exe_dir.join(name));
+    candidates.push(exe_dir.join("resources").join("bin").join(name));
+    candidates.push(exe_dir.join("resources").join(name));
+
+    if let Some(contents_dir) = exe_dir.parent() {
+      candidates.push(contents_dir.join("Resources").join("bin").join(name));
+      candidates.push(contents_dir.join("Resources").join(name));
+    }
+
+    if let Some(resources_dir) = exe_dir.ancestors().find(|path| path.ends_with("Resources")) {
+      candidates.push(resources_dir.join("bin").join(name));
+      candidates.push(resources_dir.join(name));
+    }
+  }
+
+  candidates
 }
 
 fn host_release_binary_name() -> &'static str {
@@ -691,20 +800,26 @@ fn configure_bundled_cli_env(app: &tauri::AppHandle) {
   for name in bundled_cli_binary_name_candidates() {
     if let Ok(path) = app.path().resolve(format!("bin/{name}"), BaseDirectory::Resource) {
       if path.exists() {
-        unsafe {
-          std::env::set_var("LOCAL_SENT_CLI_PATH", path);
-        }
+        set_cli_path_env(path);
         return;
       }
     }
     if let Ok(path) = app.path().resolve(name.to_string(), BaseDirectory::Resource) {
       if path.exists() {
-        unsafe {
-          std::env::set_var("LOCAL_SENT_CLI_PATH", path);
-        }
+        set_cli_path_env(path);
         return;
       }
     }
+  }
+
+  if let Some(path) = bundled_cli_binary_path() {
+    set_cli_path_env(path);
+  }
+}
+
+fn set_cli_path_env(path: PathBuf) {
+  unsafe {
+    std::env::set_var("LOCAL_SENT_CLI_PATH", path);
   }
 }
 
@@ -722,6 +837,7 @@ fn main() {
       default_output_dir,
       start_listen,
       stop_listen,
+      respond_transfer_confirm,
       listen_status
     ])
     .run(tauri::generate_context!())

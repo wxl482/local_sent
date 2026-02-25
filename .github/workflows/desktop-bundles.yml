@@ -89,6 +89,14 @@ jobs:
           New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
 
           Copy-Item (Join-Path $releaseDir "local_sent_desktop.exe") $portableDir -Force
+          $cliSourceDir = "desktop/src-tauri/bin"
+          $cliTargetDir = Join-Path $portableDir "bin"
+          if (Test-Path $cliSourceDir) {
+            New-Item -ItemType Directory -Path $cliTargetDir -Force | Out-Null
+            Get-ChildItem -Path $cliSourceDir -Filter "local_sent_cli*.exe" | ForEach-Object {
+              Copy-Item $_.FullName (Join-Path $cliTargetDir $_.Name) -Force
+            }
+          }
           if (Test-Path (Join-Path $releaseDir "resources")) {
             Copy-Item (Join-Path $releaseDir "resources") (Join-Path $portableDir "resources") -Recurse -Force
           }
@@ -100,6 +108,30 @@ jobs:
             Remove-Item -Force $portableZip
           }
           Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $portableZip -Force
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($portableZip)
+          try {
+            $hasCli = $zip.Entries | Where-Object { $_.FullName -match '^bin/local_sent_cli.*\.exe$' } | Select-Object -First 1
+            if (-not $hasCli) {
+              throw "portable zip missing bundled CLI executable"
+            }
+          } finally {
+            $zip.Dispose()
+          }
+
+      - name: Verify Linux AppImage contains bundled CLI
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APPIMAGE="$(ls desktop/src-tauri/target/release/bundle/appimage/*.AppImage | head -n 1)"
+          chmod +x "$APPIMAGE"
+          "$APPIMAGE" --appimage-extract >/dev/null
+          if ! find squashfs-root -type f -name 'local_sent_cli*' | grep -q .; then
+            echo "AppImage missing bundled CLI"
+            exit 1
+          fi
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4

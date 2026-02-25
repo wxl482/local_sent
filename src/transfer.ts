@@ -18,6 +18,17 @@ import {
   updateHashFromFilePrefix
 } from "./utils";
 
+export interface TransferConfirmRequest {
+  from: string;
+  relativePath: string;
+  fileSize: number;
+}
+
+export interface TransferConfirmDecision {
+  accept: boolean;
+  message?: string;
+}
+
 export interface ListenOptions {
   port: number;
   outputDir: string;
@@ -27,6 +38,9 @@ export interface ListenOptions {
   pairCodeTtlSeconds?: number;
   generatePairCode?: () => string;
   onPairCodeChange?: (nextCode: string | null, reason: "once" | "ttl") => void;
+  confirmTransfer?: (
+    request: TransferConfirmRequest
+  ) => Promise<TransferConfirmDecision | boolean> | TransferConfirmDecision | boolean;
   tls?: {
     certPath: string;
     keyPath: string;
@@ -516,6 +530,23 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
 
     targetPath = resolveOutputPath(outputDir, header.relativePath);
     await fsPromises.mkdir(dirname(targetPath), { recursive: true });
+
+    if (listenOptions.confirmTransfer) {
+      const decision = await listenOptions.confirmTransfer({
+        from: socket.remoteAddress ?? "unknown",
+        relativePath: header.relativePath,
+        fileSize: header.fileSize
+      });
+      const accepted = typeof decision === "boolean" ? decision : decision.accept;
+      if (!accepted) {
+        const message =
+          typeof decision === "boolean"
+            ? "receiver rejected transfer"
+            : decision.message?.trim() || "receiver rejected transfer";
+        await fail(message);
+        return;
+      }
+    }
 
     resumedFrom = await decideResumeOffset({
       targetPath,

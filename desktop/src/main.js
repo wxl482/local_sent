@@ -57,6 +57,9 @@ const translations = {
     resultSending: "正在发送...",
     resultPathSelected: "已选择发送项：{name}",
     resultSendDone: "发送完成（exit={code}）。",
+    confirmReceivePrompt: "来自 {from} 的传输请求：\n{name}\n大小：{size}\n\n是否接受？",
+    logConfirmAccepted: "已接受传输请求：{name}（来自 {from}）",
+    logConfirmRejected: "已拒绝传输请求：{name}（来自 {from}）",
     alertSendDone: "传输完毕",
     errorPathRequired: "请先选择文件或目录。",
     useButton: "使用",
@@ -115,6 +118,9 @@ const translations = {
     resultSending: "Sending...",
     resultPathSelected: "Selected item: {name}",
     resultSendDone: "Send done (exit={code}).",
+    confirmReceivePrompt: "Incoming transfer from {from}:\n{name}\nSize: {size}\n\nAccept?",
+    logConfirmAccepted: "Accepted transfer request: {name} (from {from})",
+    logConfirmRejected: "Rejected transfer request: {name} (from {from})",
     alertSendDone: "Transfer completed",
     errorPathRequired: "Please pick a file or directory first.",
     useButton: "Use",
@@ -236,6 +242,24 @@ function basenameFromPath(path) {
   const normalized = String(path).replace(/[\\/]+/g, "/");
   const parts = normalized.split("/").filter(Boolean);
   return parts.length ? parts[parts.length - 1] : String(path);
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) {
+    return "0 B";
+  }
+  if (value < 1024) {
+    return `${value.toFixed(0)} B`;
+  }
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = value / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unitIndex]}`;
 }
 
 function setResult(target, message, isError = false) {
@@ -689,6 +713,48 @@ async function bootstrap() {
 
   await listen("listen-state", (event) => {
     setListeningUi(event.payload);
+  });
+
+  await listen("transfer-confirm-request", async (event) => {
+    const payload = event.payload;
+    if (!isObject(payload)) {
+      return;
+    }
+    const id = Number(payload.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return;
+    }
+
+    const path = typeof payload.path === "string" ? payload.path : "";
+    const from = typeof payload.from === "string" && payload.from.trim() ? payload.from : "unknown";
+    const size = formatBytes(payload.size);
+    const name = basenameFromPath(path || "unknown");
+
+    const accepted = window.confirm(
+      t("confirmReceivePrompt", {
+        from,
+        name,
+        size
+      })
+    );
+
+    appendLog(
+      "confirm",
+      accepted
+        ? t("logConfirmAccepted", { name, from })
+        : t("logConfirmRejected", { name, from })
+    );
+
+    try {
+      await invoke("respond_transfer_confirm", {
+        response: {
+          id,
+          accept: accepted
+        }
+      });
+    } catch (err) {
+      appendLog("confirm", `confirm response failed: ${String(err)}`);
+    }
   });
 
   await listen("send-output", (event) => {

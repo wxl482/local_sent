@@ -24,6 +24,7 @@ type MessageKey =
   | "listen_pair_ttl_option"
   | "listen_tls_cert_option"
   | "listen_tls_key_option"
+  | "listen_confirm_each_option"
   | "send_path_arg"
   | "send_host_option"
   | "send_port_option"
@@ -72,6 +73,7 @@ type MessageKey =
   | "err_no_receiver_found"
   | "discover_selected"
   | "send_done"
+  | "send_saved_path"
   | "error_prefix";
 
 type Dictionary = Record<MessageKey, string>;
@@ -100,6 +102,7 @@ const zh: Dictionary = {
   listen_pair_ttl_option: "每 N 秒轮换配对码",
   listen_tls_cert_option: "TLS 证书文件路径（PEM）",
   listen_tls_key_option: "TLS 私钥文件路径（PEM）",
+  listen_confirm_each_option: "每次接收前等待确认（通过 stdin 指令）",
   send_path_arg: "文件或目录路径",
   send_host_option: "接收端主机；不传时自动发现首个匹配设备",
   send_port_option: "接收端端口",
@@ -148,6 +151,7 @@ const zh: Dictionary = {
   err_no_receiver_found: "未发现接收端。请使用 --host + --port，或先执行 local-sent discover",
   discover_selected: "[discover] 已选择 {name} ({host}:{port})",
   send_done: "[send] 完成: files={fileCount} bytes={bytes} resumed={resumed}",
+  send_saved_path: "[send] 接收端保存路径: {savedPath}",
   error_prefix: "[错误] {message}"
 };
 
@@ -175,6 +179,7 @@ const en: Dictionary = {
   listen_pair_ttl_option: "rotate pair code every N seconds",
   listen_tls_cert_option: "TLS cert file path (PEM)",
   listen_tls_key_option: "TLS private key file path (PEM)",
+  listen_confirm_each_option: "require per-transfer confirmation via stdin commands",
   send_path_arg: "file or directory path",
   send_host_option: "receiver host; if omitted, auto-discover first match",
   send_port_option: "receiver port",
@@ -223,6 +228,7 @@ const en: Dictionary = {
   err_no_receiver_found: "no receiver found. Use --host + --port or run local-sent discover first",
   discover_selected: "[discover] selected {name} ({host}:{port})",
   send_done: "[send] done: files={fileCount} bytes={bytes} resumed={resumed}",
+  send_saved_path: "[send] receiver saved path: {savedPath}",
   error_prefix: "[error] {message}"
 };
 
