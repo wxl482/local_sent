@@ -173,7 +173,11 @@ async function checkDiscoveryLoopback(timeoutMs: number): Promise<CheckOutcome> 
 
   try {
     await sleep(250);
-    const devices = await discoverDevices(timeoutMs);
+    const devices = await discoverDevices(timeoutMs, {
+      includeSelf: true,
+      includeLoopback: true,
+      onlyLanIpv4: false
+    });
     const found = devices.find((d) => d.name === serviceName && d.port === port);
     if (!found) {
       return {

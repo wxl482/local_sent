@@ -335,6 +335,66 @@ function formatBytes(bytes) {
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unitIndex]}`;
 }
 
+function normalizeIpv4(address) {
+  const raw = String(address ?? "").trim();
+  if (!raw) {
+    return null;
+  }
+  const value = raw.startsWith("::ffff:") ? raw.slice("::ffff:".length) : raw;
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+  if (!match) {
+    return null;
+  }
+  const octets = match.slice(1).map((item) => Number.parseInt(item, 10));
+  if (octets.some((item) => Number.isNaN(item) || item < 0 || item > 255)) {
+    return null;
+  }
+  return octets.join(".");
+}
+
+function isLanIpv4(address) {
+  if (address.startsWith("10.") || address.startsWith("192.168.")) {
+    return true;
+  }
+  const parts = address.split(".");
+  if (parts.length !== 4) {
+    return false;
+  }
+  const first = Number.parseInt(parts[0], 10);
+  const second = Number.parseInt(parts[1], 10);
+  return first === 172 && second >= 16 && second <= 31;
+}
+
+function normalizeLanIpv4(address) {
+  const ipv4 = normalizeIpv4(address);
+  if (!ipv4) {
+    return null;
+  }
+  if (!isLanIpv4(ipv4)) {
+    return null;
+  }
+  return ipv4;
+}
+
+function normalizeDiscoveredDevice(rawDevice) {
+  if (!isObject(rawDevice)) {
+    return null;
+  }
+  const host = normalizeLanIpv4(rawDevice.host);
+  if (!host) {
+    return null;
+  }
+  const addresses = Array.isArray(rawDevice.addresses)
+    ? [...new Set(rawDevice.addresses.map((item) => normalizeLanIpv4(item)).filter(Boolean))]
+    : [];
+  const name = String(rawDevice.name ?? "").trim() || host;
+  const port = Number.parseInt(String(rawDevice.port ?? ""), 10);
+  if (!Number.isFinite(port) || port <= 0) {
+    return null;
+  }
+  return { name, host, port, addresses };
+}
+
 function setResult(target, message, isError = false) {
   if (!target) {
     return;
@@ -519,11 +579,15 @@ function setSendControlsDisabled(disabled) {
 
 function renderDevices(devices) {
   ui.deviceList.innerHTML = "";
-  if (!devices.length) {
-    return;
+  const normalizedDevices = devices
+    .map((device) => normalizeDiscoveredDevice(device))
+    .filter((device) => Boolean(device));
+
+  if (!normalizedDevices.length) {
+    return 0;
   }
 
-  devices.forEach((device) => {
+  normalizedDevices.forEach((device) => {
     const item = document.createElement("article");
     item.className = "device-item";
 
@@ -559,6 +623,8 @@ function renderDevices(devices) {
     item.append(header, detail);
     ui.deviceList.append(item);
   });
+
+  return normalizedDevices.length;
 }
 
 async function refreshListenState() {
@@ -698,8 +764,8 @@ ui.discoverForm.addEventListener("submit", async (event) => {
   try {
     const timeoutMs = toPositiveInt(ui.discoverTimeout.value, 3000);
     const devices = await invoke("discover", { timeoutMs });
-    renderDevices(devices);
-    const message = t("resultFoundDevices", { count: devices.length });
+    const visibleCount = renderDevices(devices);
+    const message = t("resultFoundDevices", { count: visibleCount });
     setResult(ui.discoverResult, message);
     await showPopup(message, "success");
   } catch (err) {

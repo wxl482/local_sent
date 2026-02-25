@@ -833,6 +833,9 @@ button.ghost:hover {
   font-size: 0.64rem;
   line-height: 1.48;
   letter-spacing: 0.01em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 @media (max-width: 1120px) {

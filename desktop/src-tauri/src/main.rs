@@ -4,7 +4,7 @@ use if_addrs::get_if_addrs;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
@@ -23,7 +23,6 @@ struct AppState {
 struct ListenStateSnapshot {
   running: bool,
   pid: Option<u32>,
-  port: Option<u16>,
 }
 
 enum CliRuntime {
@@ -145,13 +144,9 @@ async fn discover(timeout_ms: Option<u64>, state: State<'_, AppState>) -> Result
   let mut devices: Vec<DiscoverDevice> =
     serde_json::from_str(stdout).map_err(|err| format!("failed to parse discovery JSON: {err}"))?;
 
-  let listen_state = inspect_listen_state(&state)?;
-  if listen_state.running {
-    if let Some(local_port) = listen_state.port {
-      let local_addresses = local_address_set();
-      devices.retain(|device| !is_self_discovered_device(device, local_port, &local_addresses));
-    }
-  }
+  let _ = inspect_listen_state(&state)?;
+  let local_addresses = local_address_set();
+  devices.retain(|device| !is_local_discovered_device(device, &local_addresses));
 
   Ok(devices)
 }
@@ -392,25 +387,33 @@ where
   R: Read + Send + 'static,
 {
   thread::spawn(move || {
-    let line_reader = BufReader::new(reader);
-    for line in line_reader.lines().map_while(Result::ok) {
-      if stream == "stdout" {
-        if let Some(request) = parse_confirm_request(&line) {
-          let payload = TransferConfirmRequestPayload {
-            id: request.id,
-            from: request.from.unwrap_or_else(|| "unknown".to_string()),
-            path: request.path,
-            size: request.size,
-          };
-          let _ = app.emit("transfer-confirm-request", payload);
-          continue;
-        }
-      }
-      let payload = ListenLogPayload {
-        stream: stream.to_string(),
-        line,
+    let mut reader = reader;
+    let mut chunk = [0u8; 4096];
+    let mut pending = String::new();
+
+    loop {
+      let read_size = match reader.read(&mut chunk) {
+        Ok(size) => size,
+        Err(_) => break,
       };
-      let _ = app.emit("listen-log", payload);
+      if read_size == 0 {
+        break;
+      }
+
+      let text = String::from_utf8_lossy(&chunk[..read_size]);
+      pending.push_str(&text);
+
+      let normalized = pending.replace('\r', "\n");
+      let mut parts: Vec<&str> = normalized.split('\n').collect();
+      let tail = parts.pop().unwrap_or_default().to_string();
+      for line in parts {
+        emit_listen_line(&app, stream, line);
+      }
+      pending = tail;
+    }
+
+    if !pending.trim().is_empty() {
+      emit_listen_line(&app, stream, &pending);
     }
   });
 }
@@ -419,6 +422,32 @@ fn parse_confirm_request(line: &str) -> Option<CliConfirmRequest> {
   const PREFIX: &str = "[confirm-request] ";
   let raw = line.strip_prefix(PREFIX)?;
   serde_json::from_str::<CliConfirmRequest>(raw).ok()
+}
+
+fn emit_listen_line(app: &AppHandle, stream: &'static str, raw_line: &str) {
+  let line = raw_line.trim();
+  if line.is_empty() {
+    return;
+  }
+
+  if stream == "stdout" {
+    if let Some(request) = parse_confirm_request(line) {
+      let payload = TransferConfirmRequestPayload {
+        id: request.id,
+        from: request.from.unwrap_or_else(|| "unknown".to_string()),
+        path: request.path,
+        size: request.size,
+      };
+      let _ = app.emit("transfer-confirm-request", payload);
+      return;
+    }
+  }
+
+  let payload = ListenLogPayload {
+    stream: stream.to_string(),
+    line: line.to_string(),
+  };
+  let _ = app.emit("listen-log", payload);
 }
 
 fn inspect_listen_state(state: &State<AppState>) -> Result<ListenStateSnapshot, String> {
@@ -457,19 +486,10 @@ fn inspect_listen_state(state: &State<AppState>) -> Result<ListenStateSnapshot, 
     return Ok(ListenStateSnapshot {
       running: false,
       pid: None,
-      port: None,
     });
   }
 
-  let port = {
-    let listen_port = state
-      .listen_port
-      .lock()
-      .map_err(|_| "failed to lock listen port state".to_string())?;
-    *listen_port
-  };
-
-  Ok(ListenStateSnapshot { running, pid, port })
+  Ok(ListenStateSnapshot { running, pid })
 }
 
 fn local_address_set() -> HashSet<String> {
@@ -480,23 +500,35 @@ fn local_address_set() -> HashSet<String> {
 
   if let Ok(ifaces) = get_if_addrs() {
     for iface in ifaces {
-      addresses.insert(iface.ip().to_string());
+      let ip = iface.ip().to_string();
+      addresses.insert(ip.clone());
+      addresses.insert(canonical_discovery_address(&ip));
     }
   }
 
   addresses
 }
 
-fn is_self_discovered_device(device: &DiscoverDevice, local_port: u16, local_addresses: &HashSet<String>) -> bool {
-  if device.port != local_port {
-    return false;
-  }
-
+fn is_local_discovered_device(device: &DiscoverDevice, local_addresses: &HashSet<String>) -> bool {
   if local_addresses.contains(&device.host) {
     return true;
   }
 
-  device.addresses.iter().any(|address| local_addresses.contains(address))
+  if local_addresses.contains(&canonical_discovery_address(&device.host)) {
+    return true;
+  }
+
+  device.addresses.iter().any(|address| {
+    local_addresses.contains(address) || local_addresses.contains(&canonical_discovery_address(address))
+  })
+}
+
+fn canonical_discovery_address(raw: &str) -> String {
+  let value = raw.trim();
+  if let Some(stripped) = value.strip_prefix("::ffff:") {
+    return stripped.to_string();
+  }
+  value.to_string()
 }
 
 #[tauri::command]
