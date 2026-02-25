@@ -7,3 +7,7 @@ desktop/src-tauri/target
 desktop/src-tauri/bin/local_sent_cli
 .codex
 .DS_Store
+
+# keep Tauri icon assets tracked even if global gitignore ignores png
+!desktop/src-tauri/icons/*.png
+!desktop/src-tauri/icons/**/*.png

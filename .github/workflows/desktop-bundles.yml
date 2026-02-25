@@ -1,7 +1,6 @@
 name: Desktop Bundles
 
 on:
-  push:
   workflow_dispatch:
 
 concurrency:
