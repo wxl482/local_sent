@@ -576,16 +576,15 @@ select {
   cursor: default;
 }
 
-input,
-#sendForm input,
-#sendForm select,
+.content input,
+.content select,
 #sendForm .picker-summary,
 #sendForm .picker-clear-btn {
   border-radius: var(--send-control-radius) !important;
 }
 
-#sendForm input,
-#sendForm select {
+.content input,
+.content select {
   height: var(--send-control-height);
 }
 
