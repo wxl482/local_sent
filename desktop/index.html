@@ -116,7 +116,17 @@
                     placeholder="123456"
                   />
                 </label>
-                <button id="sendBtn" type="submit" data-i18n="sendButton">Send Now</button>
+                <div class="inline-actions send-actions">
+                  <button id="sendBtn" type="submit" data-i18n="sendButton">Send Now</button>
+                  <button
+                    id="resumeSendBtn"
+                    type="button"
+                    class="ghost state-hidden"
+                    data-i18n="sendResumeButton"
+                  >
+                    Continue
+                  </button>
+                </div>
               </form>
               <div id="sendResult" class="muted"></div>
             </article>

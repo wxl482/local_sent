@@ -41,6 +41,8 @@ const translations = {
     sendPairLabel: "配对码（可选）",
     sendPairPlaceholder: "123456",
     sendButton: "立即发送",
+    sendResumeButton: "继续发送",
+    sendInterrupted: "发送已中断。请在接收端重新启动并同意后，点击“继续发送”。",
     logsTitle: "运行日志",
     progressSendLabel: "发送进度",
     progressRecvLabel: "接收进度",
@@ -111,6 +113,8 @@ const translations = {
     sendPairLabel: "Pair Code (optional)",
     sendPairPlaceholder: "123456",
     sendButton: "Send Now",
+    sendResumeButton: "Resume Send",
+    sendInterrupted: "Transfer interrupted. Restart receiver and approve it, then click \"Resume Send\".",
     logsTitle: "Logs",
     progressSendLabel: "Send Progress",
     progressRecvLabel: "Receive Progress",
@@ -188,6 +192,7 @@ const ui = {
   sendPort: document.querySelector("#sendPort"),
   sendPairCode: document.querySelector("#sendPairCode"),
   sendBtn: document.querySelector("#sendBtn"),
+  resumeSendBtn: document.querySelector("#resumeSendBtn"),
   sendResult: document.querySelector("#sendResult"),
   progressPanel: document.querySelector("#transferProgress"),
   sendProgressSection: document.querySelector("#sendProgressSection"),
@@ -217,6 +222,8 @@ const progressActivity = {
   recv: false
 };
 const lastLogByStream = new Map();
+let lastSendRequest = null;
+let sendTaskRunning = false;
 
 function markPlatformClass() {
   const uaData = String(navigator.userAgentData?.platform ?? "").toLowerCase();
@@ -651,6 +658,8 @@ function refreshSendPathSummary() {
 function clearSendPathSelection() {
   selectedSendPath = "";
   selectedSendLabel = "";
+  lastSendRequest = null;
+  setResumeSendVisible(false);
   refreshSendPathSummary();
 }
 
@@ -818,6 +827,9 @@ function appendStartupLogs() {
 
 function setSendControlsDisabled(disabled) {
   ui.sendBtn.disabled = disabled;
+  if (ui.resumeSendBtn) {
+    ui.resumeSendBtn.disabled = disabled || ui.resumeSendBtn.classList.contains("state-hidden");
+  }
   if (ui.sendPathKind) {
     ui.sendPathKind.disabled = disabled;
   }
@@ -828,6 +840,92 @@ function setSendControlsDisabled(disabled) {
     ui.sendPathSummary.classList.toggle("is-disabled", disabled);
     ui.sendPathSummary.setAttribute("aria-disabled", String(disabled));
     ui.sendPathSummary.tabIndex = disabled ? -1 : 0;
+  }
+}
+
+function setResumeSendVisible(visible) {
+  if (!ui.resumeSendBtn) {
+    return;
+  }
+  ui.resumeSendBtn.classList.toggle("state-hidden", !visible);
+  ui.resumeSendBtn.disabled = !visible || sendTaskRunning;
+}
+
+function isSendInterruptedError(rawMessage) {
+  const message = String(rawMessage ?? "").toLowerCase();
+  return [
+    "connection closed before ack",
+    "connection reset",
+    "econnreset",
+    "econnaborted",
+    "write epipe",
+    "broken pipe",
+    "socket hang up",
+    "receiver rejected transfer"
+  ].some((pattern) => message.includes(pattern));
+}
+
+function buildSendRequestFromUi() {
+  if (!selectedSendPath.trim()) {
+    throw new Error(t("errorPathRequired"));
+  }
+
+  return {
+    path: selectedSendPath,
+    host: ui.sendHost.value.trim() || null,
+    port: toPositiveInt(ui.sendPort.value, 37373),
+    timeoutMs: 3000,
+    pairCode: ui.sendPairCode.value.trim() || null
+  };
+}
+
+async function runSendRequest(request, options = {}) {
+  const resumeMode = Boolean(options.resumeMode);
+  if (sendTaskRunning) {
+    return;
+  }
+
+  sendTaskRunning = true;
+  setSendControlsDisabled(true);
+  setResumeSendVisible(false);
+  setProgressActive("send", true);
+  if (!resumeMode) {
+    resetProgress("send");
+  }
+  streamBuffers.set("send", "");
+  streamBuffers.set("send-err", "");
+  setResult(ui.sendResult, t("resultSending"));
+  await waitForNextFrame();
+
+  try {
+    const output = await invoke("send_file", { request });
+    lastSendRequest = null;
+    setResumeSendVisible(false);
+    const resultMessage = t("resultSendDone", { code: output.code });
+    setResult(ui.sendResult, resultMessage);
+    setProgress("send", 100, t("alertSendDone"), true);
+    queueProgressReset("send");
+    await showPopup(t("alertSendDone"), "success");
+  } catch (err) {
+    const message = toErrorMessage(err);
+    if (isSendInterruptedError(message)) {
+      lastSendRequest = { ...request };
+      setProgressActive("send", true);
+      setResumeSendVisible(true);
+      const interruptedMessage = t("sendInterrupted");
+      appendLog("send", interruptedMessage);
+      await showPopup(interruptedMessage, "error");
+    } else {
+      lastSendRequest = null;
+      setProgressActive("send", false);
+      resetProgress("send");
+      setResumeSendVisible(false);
+      setResult(ui.sendResult, message, true);
+      await showPopup(message, "error");
+    }
+  } finally {
+    sendTaskRunning = false;
+    setSendControlsDisabled(false);
   }
 }
 
@@ -914,6 +1012,8 @@ async function pickSendPath(kind) {
     if (typeof selectedPath === "string" && selectedPath.trim()) {
       selectedSendPath = selectedPath;
       selectedSendLabel = basenameFromPath(selectedPath);
+      lastSendRequest = null;
+      setResumeSendVisible(false);
       refreshSendPathSummary();
     }
   } catch (err) {
@@ -1079,43 +1179,24 @@ ui.stopListenBtn.addEventListener("click", async () => {
 
 ui.sendForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  setSendControlsDisabled(true);
-  setProgressActive("send", true);
-  resetProgress("send");
-  streamBuffers.set("send", "");
-  streamBuffers.set("send-err", "");
-  setResult(ui.sendResult, t("resultSending"));
-  await waitForNextFrame();
-
   try {
-    if (!selectedSendPath.trim()) {
-      throw new Error(t("errorPathRequired"));
-    }
-
-    const request = {
-      path: selectedSendPath,
-      host: ui.sendHost.value.trim() || null,
-      port: toPositiveInt(ui.sendPort.value, 37373),
-      timeoutMs: 3000,
-      pairCode: ui.sendPairCode.value.trim() || null
-    };
-
-    const output = await invoke("send_file", { request });
-    const resultMessage = t("resultSendDone", { code: output.code });
-    setResult(ui.sendResult, resultMessage);
-    setProgress("send", 100, t("alertSendDone"), true);
-    queueProgressReset("send");
-    await showPopup(t("alertSendDone"), "success");
+    const request = buildSendRequestFromUi();
+    await runSendRequest(request, { resumeMode: false });
   } catch (err) {
-    setProgressActive("send", false);
-    resetProgress("send");
     const message = toErrorMessage(err);
     setResult(ui.sendResult, message, true);
     await showPopup(message, "error");
-  } finally {
-    setSendControlsDisabled(false);
   }
 });
+
+if (ui.resumeSendBtn) {
+  ui.resumeSendBtn.addEventListener("click", async () => {
+    if (!lastSendRequest) {
+      return;
+    }
+    await runSendRequest({ ...lastSendRequest }, { resumeMode: true });
+  });
+}
 
 async function bootstrap() {
   applyTheme();

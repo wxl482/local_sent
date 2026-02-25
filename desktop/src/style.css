@@ -683,6 +683,18 @@ button.ghost:hover {
   flex: 1 1 auto;
 }
 
+.send-actions #sendBtn {
+  flex: 1 1 auto;
+}
+
+.send-actions #resumeSendBtn {
+  flex: 0 0 42%;
+}
+
+.state-hidden {
+  display: none !important;
+}
+
 .picker-summary {
   min-height: var(--send-control-height);
   display: flex;

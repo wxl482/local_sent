@@ -17,6 +17,13 @@ struct AppState {
   listen_child: Mutex<Option<Child>>,
   listen_stdin: Mutex<Option<ChildStdin>>,
   listen_port: Mutex<Option<u16>>,
+  active_child_pids: Mutex<HashSet<u32>>,
+}
+
+impl Drop for AppState {
+  fn drop(&mut self) {
+    cleanup_child_processes(self);
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -121,8 +128,114 @@ struct TransferConfirmRequestPayload {
   size: u64,
 }
 
+fn register_active_pid_with_state(state: &AppState, pid: u32) {
+  if pid == 0 {
+    return;
+  }
+  if let Ok(mut guard) = state.active_child_pids.lock() {
+    guard.insert(pid);
+  }
+}
+
+fn unregister_active_pid_with_state(state: &AppState, pid: u32) {
+  if pid == 0 {
+    return;
+  }
+  if let Ok(mut guard) = state.active_child_pids.lock() {
+    guard.remove(&pid);
+  }
+}
+
+fn register_active_pid(app: &AppHandle, pid: u32) {
+  register_active_pid_with_state(app.state::<AppState>().inner(), pid);
+}
+
+fn unregister_active_pid(app: &AppHandle, pid: u32) {
+  unregister_active_pid_with_state(app.state::<AppState>().inner(), pid);
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_process_tree(pid: u32) {
+  if pid == 0 {
+    return;
+  }
+  let mut command = Command::new("taskkill");
+  command
+    .arg("/PID")
+    .arg(pid.to_string())
+    .arg("/T")
+    .arg("/F")
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+  configure_cli_command_for_platform(&mut command);
+  let _ = command.status();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn terminate_process_tree(pid: u32) {
+  if pid == 0 {
+    return;
+  }
+  let pid_arg = pid.to_string();
+  let _ = Command::new("kill")
+    .arg("-TERM")
+    .arg(&pid_arg)
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status();
+  let _ = Command::new("kill")
+    .arg("-KILL")
+    .arg(&pid_arg)
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status();
+}
+
+fn cleanup_child_processes(state: &AppState) {
+  let listen_pid = if let Ok(mut guard) = state.listen_child.lock() {
+    if let Some(mut child) = guard.take() {
+      let pid = child.id();
+      terminate_process_tree(pid);
+      let _ = child.kill();
+      let _ = child.wait();
+      Some(pid)
+    } else {
+      None
+    }
+  } else {
+    None
+  };
+
+  if let Ok(mut stdin_guard) = state.listen_stdin.lock() {
+    *stdin_guard = None;
+  }
+  if let Ok(mut listen_port) = state.listen_port.lock() {
+    *listen_port = None;
+  }
+
+  let mut tracked_pids = if let Ok(mut guard) = state.active_child_pids.lock() {
+    let pids = guard.iter().copied().collect::<Vec<u32>>();
+    guard.clear();
+    pids
+  } else {
+    Vec::new()
+  };
+
+  if let Some(pid) = listen_pid {
+    tracked_pids.retain(|item| *item != pid);
+  }
+
+  for pid in tracked_pids {
+    terminate_process_tree(pid);
+  }
+}
+
 #[tauri::command]
-async fn discover(timeout_ms: Option<u64>, state: State<'_, AppState>) -> Result<Vec<DiscoverDevice>, String> {
+async fn discover(
+  app: AppHandle,
+  timeout_ms: Option<u64>,
+  state: State<'_, AppState>,
+) -> Result<Vec<DiscoverDevice>, String> {
   let timeout = timeout_ms.unwrap_or(3000).max(100);
   let args = vec![
     "discover".to_string(),
@@ -131,7 +244,7 @@ async fn discover(timeout_ms: Option<u64>, state: State<'_, AppState>) -> Result
     "--json".to_string(),
   ];
 
-  let output = run_cli_capture_async(args).await?;
+  let output = run_cli_capture_async(app, args).await?;
   if !output.success {
     return Err(render_cli_error("discover", &output));
   }
@@ -282,6 +395,7 @@ fn start_listen(
     .map_err(|err| format!("failed to start listen process: {err}"))?;
 
   let pid = child.id();
+  register_active_pid_with_state(state.inner(), pid);
   let child_stdin = child.stdin.take();
   if let Some(stdout) = child.stdout.take() {
     spawn_log_reader(stdout, "stdout", app.clone());
@@ -323,8 +437,11 @@ fn stop_listen(app: AppHandle, state: State<AppState>) -> Result<ListenStatePayl
     .map_err(|_| "failed to lock listen process state".to_string())?;
 
   if let Some(mut child) = guard.take() {
+    let pid = child.id();
+    terminate_process_tree(pid);
     let _ = child.kill();
     let _ = child.wait();
+    unregister_active_pid_with_state(state.inner(), pid);
   }
   drop(guard);
 
@@ -477,15 +594,17 @@ fn emit_listen_line(app: &AppHandle, stream: &'static str, raw_line: &str) {
 }
 
 fn inspect_listen_state(state: &State<AppState>) -> Result<ListenStateSnapshot, String> {
-  let (running, pid) = {
+  let (running, pid, exited_pid) = {
     let mut guard = state
       .listen_child
       .lock()
       .map_err(|_| "failed to lock listen process state".to_string())?;
+    let mut exited_pid: Option<u32> = None;
 
     if let Some(child) = guard.as_mut() {
       match child.try_wait() {
         Ok(Some(_)) => {
+          exited_pid = Some(child.id());
           *guard = None;
         }
         Ok(None) => {}
@@ -494,8 +613,12 @@ fn inspect_listen_state(state: &State<AppState>) -> Result<ListenStateSnapshot, 
         }
       }
     }
-    (guard.is_some(), guard.as_ref().map(|child| child.id()))
+    (guard.is_some(), guard.as_ref().map(|child| child.id()), exited_pid)
   };
+
+  if let Some(pid) = exited_pid {
+    unregister_active_pid_with_state(state.inner(), pid);
+  }
 
   if !running {
     let mut listen_stdin = state
@@ -575,8 +698,8 @@ fn default_output_dir() -> String {
     .unwrap_or_else(|| "./received".to_string())
 }
 
-async fn run_cli_capture_async(args: Vec<String>) -> Result<CommandResult, String> {
-  tauri::async_runtime::spawn_blocking(move || run_cli_capture(args))
+async fn run_cli_capture_async(app: AppHandle, args: Vec<String>) -> Result<CommandResult, String> {
+  tauri::async_runtime::spawn_blocking(move || run_cli_capture(app, args))
     .await
     .map_err(|err| format!("failed to join CLI task: {err}"))?
 }
@@ -587,20 +710,46 @@ async fn run_cli_capture_streaming_async(app: AppHandle, args: Vec<String>) -> R
     .map_err(|err| format!("failed to join CLI task: {err}"))?
 }
 
-fn run_cli_capture(args: Vec<String>) -> Result<CommandResult, String> {
+fn run_cli_capture(app: AppHandle, args: Vec<String>) -> Result<CommandResult, String> {
   let mut command = build_cli_command(&args)?;
-  let output = command
+  let mut child = command
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
-    .output()
+    .spawn()
     .map_err(|err| format!("failed to execute CLI: {err}"))?;
 
-  Ok(CommandResult {
-    success: output.status.success(),
-    code: output.status.code().unwrap_or(-1),
-    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-  })
+  let pid = child.id();
+  register_active_pid(&app, pid);
+
+  let result = (|| -> Result<CommandResult, String> {
+    let stdout = child
+      .stdout
+      .take()
+      .ok_or_else(|| "failed to capture CLI stdout".to_string())?;
+    let stderr = child
+      .stderr
+      .take()
+      .ok_or_else(|| "failed to capture CLI stderr".to_string())?;
+
+    let stdout_reader = thread::spawn(move || read_output_stream(stdout, "stdout"));
+    let stderr_reader = thread::spawn(move || read_output_stream(stderr, "stderr"));
+
+    let status = child
+      .wait()
+      .map_err(|err| format!("failed to wait CLI process: {err}"))?;
+    let stdout = join_stream_reader(stdout_reader, "stdout")?;
+    let stderr = join_stream_reader(stderr_reader, "stderr")?;
+
+    Ok(CommandResult {
+      success: status.success(),
+      code: status.code().unwrap_or(-1),
+      stdout,
+      stderr,
+    })
+  })();
+
+  unregister_active_pid(&app, pid);
+  result
 }
 
 fn run_cli_capture_streaming(app: AppHandle, args: Vec<String>) -> Result<CommandResult, String> {
@@ -611,31 +760,40 @@ fn run_cli_capture_streaming(app: AppHandle, args: Vec<String>) -> Result<Comman
     .spawn()
     .map_err(|err| format!("failed to execute CLI: {err}"))?;
 
-  let stdout = child
-    .stdout
-    .take()
-    .ok_or_else(|| "failed to capture CLI stdout".to_string())?;
-  let stderr = child
-    .stderr
-    .take()
-    .ok_or_else(|| "failed to capture CLI stderr".to_string())?;
+  let pid = child.id();
+  register_active_pid(&app, pid);
 
-  let stdout_app = app.clone();
-  let stdout_reader = thread::spawn(move || stream_output(stdout, "stdout", stdout_app));
-  let stderr_reader = thread::spawn(move || stream_output(stderr, "stderr", app));
+  let result = (|| -> Result<CommandResult, String> {
+    let stdout = child
+      .stdout
+      .take()
+      .ok_or_else(|| "failed to capture CLI stdout".to_string())?;
+    let stderr = child
+      .stderr
+      .take()
+      .ok_or_else(|| "failed to capture CLI stderr".to_string())?;
 
-  let status = child
-    .wait()
-    .map_err(|err| format!("failed to wait CLI process: {err}"))?;
-  let stdout = join_stream_reader(stdout_reader, "stdout")?;
-  let stderr = join_stream_reader(stderr_reader, "stderr")?;
+    let stdout_app = app.clone();
+    let stderr_app = app.clone();
+    let stdout_reader = thread::spawn(move || stream_output(stdout, "stdout", stdout_app));
+    let stderr_reader = thread::spawn(move || stream_output(stderr, "stderr", stderr_app));
 
-  Ok(CommandResult {
-    success: status.success(),
-    code: status.code().unwrap_or(-1),
-    stdout,
-    stderr,
-  })
+    let status = child
+      .wait()
+      .map_err(|err| format!("failed to wait CLI process: {err}"))?;
+    let stdout = join_stream_reader(stdout_reader, "stdout")?;
+    let stderr = join_stream_reader(stderr_reader, "stderr")?;
+
+    Ok(CommandResult {
+      success: status.success(),
+      code: status.code().unwrap_or(-1),
+      stdout,
+      stderr,
+    })
+  })();
+
+  unregister_active_pid(&app, pid);
+  result
 }
 
 fn join_stream_reader(
@@ -646,6 +804,17 @@ fn join_stream_reader(
     Ok(output) => output,
     Err(_) => Err(format!("failed to join CLI {stream} reader")),
   }
+}
+
+fn read_output_stream<R>(mut reader: R, stream: &'static str) -> Result<String, String>
+where
+  R: Read,
+{
+  let mut output = Vec::new();
+  reader
+    .read_to_end(&mut output)
+    .map_err(|err| format!("failed to read CLI {stream}: {err}"))?;
+  Ok(String::from_utf8_lossy(&output).to_string())
 }
 
 fn stream_output<R>(mut reader: R, stream: &'static str, app: AppHandle) -> Result<String, String>
@@ -685,13 +854,46 @@ fn default_download_dir() -> Option<PathBuf> {
   Some(PathBuf::from(home).join("Downloads"))
 }
 
+fn is_progress_line_for_error(line: &str) -> bool {
+  let trimmed = line.trim_start();
+  (trimmed.starts_with("[send ") || trimmed.starts_with("[recv ")) && trimmed.contains('%')
+}
+
+fn sanitize_cli_error_section(raw: &str) -> String {
+  let mut lines: Vec<String> = Vec::new();
+  for line in raw.replace('\r', "\n").lines() {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || is_progress_line_for_error(trimmed) {
+      continue;
+    }
+    if lines.last().is_some_and(|prev| prev == trimmed) {
+      continue;
+    }
+    lines.push(trimmed.to_string());
+  }
+
+  if lines.len() > 8 {
+    let keep_head = 2usize;
+    let keep_tail = 5usize;
+    let mut compact: Vec<String> = Vec::new();
+    compact.extend(lines.iter().take(keep_head).cloned());
+    compact.push("...".to_string());
+    compact.extend(lines.iter().rev().take(keep_tail).cloned().rev());
+    lines = compact;
+  }
+
+  lines.join("\n")
+}
+
 fn render_cli_error(command: &str, output: &CommandResult) -> String {
   let mut lines = vec![format!("{command} failed (exit code {})", output.code)];
-  if !output.stderr.trim().is_empty() {
-    lines.push(output.stderr.trim().to_string());
+  let stderr = sanitize_cli_error_section(&output.stderr);
+  let stdout = sanitize_cli_error_section(&output.stdout);
+  if !stderr.is_empty() {
+    lines.push(stderr);
   }
-  if !output.stdout.trim().is_empty() {
-    lines.push(output.stdout.trim().to_string());
+  if !stdout.is_empty() {
+    lines.push(stdout);
   }
   lines.join("\n")
 }
