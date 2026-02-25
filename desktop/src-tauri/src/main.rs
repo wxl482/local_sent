@@ -390,6 +390,7 @@ where
     let mut reader = reader;
     let mut chunk = [0u8; 4096];
     let mut pending = String::new();
+    let mut last_live_progress: Option<String> = None;
 
     loop {
       let read_size = match reader.read(&mut chunk) {
@@ -407,15 +408,40 @@ where
       let mut parts: Vec<&str> = normalized.split('\n').collect();
       let tail = parts.pop().unwrap_or_default().to_string();
       for line in parts {
-        emit_listen_line(&app, stream, line);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+          continue;
+        }
+        if last_live_progress.as_deref() == Some(trimmed) {
+          last_live_progress = None;
+          continue;
+        }
+        emit_listen_line(&app, stream, trimmed);
+      }
+
+      let trimmed_tail = tail.trim();
+      if is_transfer_progress_line(trimmed_tail) {
+        if last_live_progress.as_deref() != Some(trimmed_tail) {
+          emit_listen_line(&app, stream, trimmed_tail);
+          last_live_progress = Some(trimmed_tail.to_string());
+        }
+      } else {
+        last_live_progress = None;
       }
       pending = tail;
     }
 
     if !pending.trim().is_empty() {
-      emit_listen_line(&app, stream, &pending);
+      if last_live_progress.as_deref() != Some(pending.trim()) {
+        emit_listen_line(&app, stream, &pending);
+      }
     }
   });
+}
+
+fn is_transfer_progress_line(raw_line: &str) -> bool {
+  let line = raw_line.trim_start();
+  (line.starts_with("[send ") || line.starts_with("[recv ")) && line.contains('%')
 }
 
 fn parse_confirm_request(line: &str) -> Option<CliConfirmRequest> {
@@ -434,7 +460,7 @@ fn emit_listen_line(app: &AppHandle, stream: &'static str, raw_line: &str) {
     if let Some(request) = parse_confirm_request(line) {
       let payload = TransferConfirmRequestPayload {
         id: request.id,
-        from: request.from.unwrap_or_else(|| "unknown".to_string()),
+        from: canonical_discovery_address(&request.from.unwrap_or_else(|| "unknown".to_string())),
         path: request.path,
         size: request.size,
       };

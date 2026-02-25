@@ -165,6 +165,26 @@
 
         <section class="logs-wrap">
           <article class="card">
+            <div id="transferProgress" class="transfer-progress is-collapsed" aria-live="polite">
+              <div id="sendProgressSection" class="transfer-progress-section is-collapsed" data-progress-kind="send">
+                <div class="transfer-progress-row">
+                  <span class="transfer-progress-label" data-i18n="progressSendLabel">发送进度</span>
+                  <span id="sendProgressText" class="transfer-progress-text">-</span>
+                </div>
+                <div class="transfer-progress-track">
+                  <div id="sendProgressBar" class="transfer-progress-fill"></div>
+                </div>
+              </div>
+              <div id="recvProgressSection" class="transfer-progress-section is-collapsed" data-progress-kind="recv">
+                <div class="transfer-progress-row">
+                  <span class="transfer-progress-label" data-i18n="progressRecvLabel">接收进度</span>
+                  <span id="recvProgressText" class="transfer-progress-text">-</span>
+                </div>
+                <div class="transfer-progress-track">
+                  <div id="recvProgressBar" class="transfer-progress-fill recv"></div>
+                </div>
+              </div>
+            </div>
             <h2 data-i18n="logsTitle">Logs</h2>
             <pre id="logPane" class="log-pane"></pre>
           </article>

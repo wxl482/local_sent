@@ -42,6 +42,9 @@ const translations = {
     sendPairPlaceholder: "123456",
     sendButton: "立即发送",
     logsTitle: "运行日志",
+    progressSendLabel: "发送进度",
+    progressRecvLabel: "接收进度",
+    progressIdle: "等待中",
     listenOffline: "接收端未运行",
     listenOnline: "接收端运行中（pid {pid}）",
     resultNoScanYet: "尚未扫描。",
@@ -109,6 +112,9 @@ const translations = {
     sendPairPlaceholder: "123456",
     sendButton: "Send Now",
     logsTitle: "Logs",
+    progressSendLabel: "Send Progress",
+    progressRecvLabel: "Receive Progress",
+    progressIdle: "Idle",
     listenOffline: "Receiver Offline",
     listenOnline: "Receiver Online (pid {pid})",
     resultNoScanYet: "No scan yet.",
@@ -144,6 +150,9 @@ const translations = {
 
 const supportedLanguages = ["zh", "en"];
 const supportedThemes = ["light", "dark"];
+const ANSI_ESCAPE_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+const IPV4_MAPPED_PATTERN = /::ffff:(\d{1,3}(?:\.\d{1,3}){3})/g;
+const RECEIVE_SAVED_LOG_DELAY_MS = 260;
 
 const ui = {
   topbar: document.querySelector(".topbar"),
@@ -180,6 +189,13 @@ const ui = {
   sendPairCode: document.querySelector("#sendPairCode"),
   sendBtn: document.querySelector("#sendBtn"),
   sendResult: document.querySelector("#sendResult"),
+  progressPanel: document.querySelector("#transferProgress"),
+  sendProgressSection: document.querySelector("#sendProgressSection"),
+  recvProgressSection: document.querySelector("#recvProgressSection"),
+  sendProgressBar: document.querySelector("#sendProgressBar"),
+  sendProgressText: document.querySelector("#sendProgressText"),
+  recvProgressBar: document.querySelector("#recvProgressBar"),
+  recvProgressText: document.querySelector("#recvProgressText"),
 
   logPane: document.querySelector("#logPane")
 };
@@ -189,7 +205,18 @@ let currentTheme = detectInitialTheme();
 let currentView = "send";
 let selectedSendPath = "";
 let selectedSendLabel = "";
-let sendProgressBuffer = "";
+const streamBuffers = new Map();
+let sendProgressResetTimer = null;
+let recvProgressResetTimer = null;
+const progressState = {
+  send: { lastUpdatedAt: 0, lastPercent: -1, lastSignature: "" },
+  recv: { lastUpdatedAt: 0, lastPercent: -1, lastSignature: "" }
+};
+const progressActivity = {
+  send: false,
+  recv: false
+};
+const lastLogByStream = new Map();
 
 function markPlatformClass() {
   const uaData = String(navigator.userAgentData?.platform ?? "").toLowerCase();
@@ -266,6 +293,7 @@ async function showPopup(message, type = "info") {
     customClass: {
       popup: "localsent-swal-popup",
       title: "localsent-swal-title",
+      actions: "localsent-swal-actions",
       confirmButton: "localsent-swal-confirm",
       cancelButton: "localsent-swal-cancel"
     },
@@ -288,6 +316,7 @@ async function showConfirmPopup(message) {
     customClass: {
       popup: "localsent-swal-popup",
       title: "localsent-swal-title",
+      actions: "localsent-swal-actions",
       confirmButton: "localsent-swal-confirm",
       cancelButton: "localsent-swal-cancel"
     },
@@ -376,6 +405,22 @@ function normalizeLanIpv4(address) {
   return ipv4;
 }
 
+function normalizeDisplayLine(rawLine) {
+  return String(rawLine ?? "")
+    .replace(ANSI_ESCAPE_PATTERN, "")
+    .replace(IPV4_MAPPED_PATTERN, "$1")
+    .replace(/\u0000/g, "")
+    .trim();
+}
+
+function formatPeerAddress(address) {
+  const cleaned = normalizeDisplayLine(address);
+  if (!cleaned) {
+    return "unknown";
+  }
+  return cleaned;
+}
+
 function normalizeDiscoveredDevice(rawDevice) {
   if (!isObject(rawDevice)) {
     return null;
@@ -403,6 +448,182 @@ function setResult(target, message, isError = false) {
   target.classList.remove("error");
 }
 
+function progressKindForView(view) {
+  return view === "receive" ? "recv" : "send";
+}
+
+function resolveVisibleProgressKind() {
+  if (progressActivity.send && !progressActivity.recv) {
+    return "send";
+  }
+  if (progressActivity.recv && !progressActivity.send) {
+    return "recv";
+  }
+  if (progressActivity.send && progressActivity.recv) {
+    return progressKindForView(currentView);
+  }
+  return null;
+}
+
+function syncProgressVisibility() {
+  if (!ui.progressPanel || !ui.sendProgressSection || !ui.recvProgressSection) {
+    return;
+  }
+
+  const visibleKind = resolveVisibleProgressKind();
+  ui.progressPanel.classList.toggle("is-collapsed", !visibleKind);
+  ui.sendProgressSection.classList.toggle("is-collapsed", visibleKind !== "send");
+  ui.recvProgressSection.classList.toggle("is-collapsed", visibleKind !== "recv");
+}
+
+function setProgressActive(kind, active) {
+  const normalizedKind = kind === "recv" ? "recv" : "send";
+  const next = Boolean(active);
+  if (next) {
+    if (normalizedKind === "send" && sendProgressResetTimer) {
+      window.clearTimeout(sendProgressResetTimer);
+      sendProgressResetTimer = null;
+    }
+    if (normalizedKind === "recv" && recvProgressResetTimer) {
+      window.clearTimeout(recvProgressResetTimer);
+      recvProgressResetTimer = null;
+    }
+  }
+  if (progressActivity[normalizedKind] === next) {
+    return;
+  }
+  progressActivity[normalizedKind] = next;
+  syncProgressVisibility();
+}
+
+function setProgress(kind, percent, text, force = false) {
+  const bar = kind === "send" ? ui.sendProgressBar : ui.recvProgressBar;
+  const label = kind === "send" ? ui.sendProgressText : ui.recvProgressText;
+  const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+  const safeText = String(text ?? "").trim() || `${safePercent.toFixed(1)}%`;
+  const state = kind === "send" ? progressState.send : progressState.recv;
+  const now = Date.now();
+  const signature = `${safePercent.toFixed(1)}|${safeText}`;
+  const percentDelta = Math.abs(safePercent - state.lastPercent);
+
+  if (!force && now - state.lastUpdatedAt < 80 && percentDelta < 0.35) {
+    return;
+  }
+
+  if (!force && signature === state.lastSignature && now - state.lastUpdatedAt < 220) {
+    return;
+  }
+
+  state.lastUpdatedAt = now;
+  state.lastPercent = safePercent;
+  state.lastSignature = signature;
+
+  if (bar) {
+    bar.style.width = `${safePercent}%`;
+    bar.setAttribute("aria-valuenow", safePercent.toFixed(1));
+  }
+  if (label) {
+    label.textContent = safeText;
+  }
+}
+
+function resetProgress(kind) {
+  const state = kind === "send" ? progressState.send : progressState.recv;
+  state.lastUpdatedAt = 0;
+  state.lastPercent = -1;
+  state.lastSignature = "";
+  setProgress(kind, 0, t("progressIdle"), true);
+}
+
+function queueProgressReset(kind) {
+  const timerKey = kind === "send" ? "send" : "recv";
+  if (timerKey === "send" && sendProgressResetTimer) {
+    window.clearTimeout(sendProgressResetTimer);
+  }
+  if (timerKey === "recv" && recvProgressResetTimer) {
+    window.clearTimeout(recvProgressResetTimer);
+  }
+
+  const timer = window.setTimeout(() => {
+    if (timerKey === "send") {
+      sendProgressResetTimer = null;
+    } else {
+      recvProgressResetTimer = null;
+    }
+    resetProgress(kind);
+    setProgressActive(kind, false);
+  }, 1600);
+
+  if (timerKey === "send") {
+    sendProgressResetTimer = timer;
+  } else {
+    recvProgressResetTimer = timer;
+  }
+}
+
+function parseTransferProgressLine(line) {
+  const matched =
+    /\[(send|recv)\s+([^\]]+)\]\s+(\d+(?:\.\d+)?)%\s*(?:\(([^)]*)\))?\s*([^\s]+\/s)?\s*(?:ETA\s+(\d+)s)?/i.exec(
+      line
+    );
+  if (!matched) {
+    return null;
+  }
+  const eta = matched[6] ? Number.parseInt(matched[6], 10) : null;
+  return {
+    kind: matched[1].toLowerCase() === "send" ? "send" : "recv",
+    label: matched[2],
+    percent: Number.parseFloat(matched[3]),
+    amount: matched[4] ?? "",
+    speed: matched[5] ?? "",
+    eta: Number.isFinite(eta) ? eta : null
+  };
+}
+
+function handleProgressLine(stream, line) {
+  const progress = parseTransferProgressLine(line);
+  if (progress) {
+    setProgressActive(progress.kind, true);
+    const compactLabel = basenameFromPath(progress.label);
+    const text = [
+      `${progress.percent.toFixed(1)}%`,
+      compactLabel,
+      progress.amount,
+      progress.speed,
+      progress.eta !== null ? `ETA ${progress.eta}s` : ""
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    setProgress(progress.kind, progress.percent, text);
+    return true;
+  }
+
+  if (/^\[send\]\s+done:/i.test(line)) {
+    setProgressActive("send", true);
+    setProgress("send", 100, line, true);
+    queueProgressReset("send");
+    return false;
+  }
+
+  if (/^\[receive\]\s+saved\s+/i.test(line)) {
+    setProgressActive("recv", true);
+    setProgress("recv", 100, line.replace(/^\[receive\]\s+saved\s+/i, "saved: "), true);
+    window.setTimeout(() => {
+      appendLog(stream, line);
+    }, RECEIVE_SAVED_LOG_DELAY_MS);
+    queueProgressReset("recv");
+    return true;
+  }
+
+  if (/^\[receive\]\s+failed:/i.test(line)) {
+    setProgressActive("recv", true);
+    queueProgressReset("recv");
+    return false;
+  }
+
+  return false;
+}
+
 function setActiveView(view) {
   currentView = view;
   const sendActive = view === "send";
@@ -410,6 +631,7 @@ function setActiveView(view) {
   ui.navReceiveBtn.classList.toggle("active", !sendActive);
   ui.sendView.classList.toggle("is-active", sendActive);
   ui.receiveView.classList.toggle("is-active", !sendActive);
+  syncProgressVisibility();
 }
 
 function refreshSendPathSummary() {
@@ -464,6 +686,9 @@ function applyI18n() {
   setResult(ui.discoverResult, t("resultNoScanYet"));
   setResult(ui.listenResult, t("resultReceiverNotRunning"));
   setResult(ui.sendResult, "");
+  resetProgress("send");
+  resetProgress("recv");
+  syncProgressVisibility();
 }
 
 function toPositiveInt(value, fallback) {
@@ -484,6 +709,11 @@ function setListeningUi(state) {
 
   ui.startListenBtn.disabled = running;
   ui.stopListenBtn.disabled = !running;
+
+  if (!running) {
+    setProgressActive("recv", false);
+    resetProgress("recv");
+  }
 }
 
 function setupWindowDragging() {
@@ -526,19 +756,56 @@ function setupWindowDragging() {
 }
 
 function appendLog(stream, line) {
+  const normalizedLine = normalizeDisplayLine(line);
+  if (!normalizedLine) {
+    return;
+  }
+  const now = Date.now();
+  const previous = lastLogByStream.get(stream);
+  if (previous && previous.line === normalizedLine && now - previous.at < 600) {
+    return;
+  }
+  lastLogByStream.set(stream, { line: normalizedLine, at: now });
   const stamp = new Date().toLocaleTimeString();
-  const text = `[${stamp}] [${stream}] ${line}`.trim();
+  const text = `[${stamp}] [${stream}] ${normalizedLine}`.trim();
   ui.logPane.textContent += `${text}\n`;
   ui.logPane.scrollTop = ui.logPane.scrollHeight;
 }
 
+function processLogLine(stream, rawLine) {
+  const line = normalizeDisplayLine(rawLine);
+  if (!line) {
+    return;
+  }
+  if (handleProgressLine(stream, line)) {
+    return;
+  }
+  appendLog(stream, line);
+}
+
 function appendChunkToLog(stream, chunk) {
-  String(chunk)
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .forEach((line) => appendLog(stream, line));
+  const normalized = String(chunk ?? "");
+  const previous = streamBuffers.get(stream) ?? "";
+  const merged = previous + normalized;
+  const segments = merged.split(/\r|\n/);
+  const tail = segments.pop() ?? "";
+
+  segments.forEach((line) => processLogLine(stream, line));
+  const liveTail = normalizeDisplayLine(tail);
+  if (liveTail && handleProgressLine(stream, liveTail)) {
+    streamBuffers.set(stream, "");
+    return;
+  }
+  streamBuffers.set(stream, tail);
+}
+
+function flushStreamBuffer(stream) {
+  const pending = streamBuffers.get(stream);
+  if (!pending || !pending.trim()) {
+    return;
+  }
+  processLogLine(stream, pending);
+  streamBuffers.set(stream, "");
 }
 
 function appendStartupLogs() {
@@ -547,19 +814,6 @@ function appendStartupLogs() {
   }
   appendLog("system", t("logStartupReady"));
   appendLog("system", t("logStartupHint"));
-}
-
-function readLatestSendProgress(chunk) {
-  sendProgressBuffer += String(chunk);
-  const segments = sendProgressBuffer.split(/\r|\n/);
-  sendProgressBuffer = segments.pop() ?? "";
-
-  const stableTokens = segments
-    .map((token) => token.trim())
-    .filter(Boolean);
-  const stableLatest = stableTokens.length ? stableTokens[stableTokens.length - 1] : null;
-  const liveLatest = sendProgressBuffer.trim();
-  return liveLatest || stableLatest || null;
 }
 
 function setSendControlsDisabled(disabled) {
@@ -826,7 +1080,10 @@ ui.stopListenBtn.addEventListener("click", async () => {
 ui.sendForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   setSendControlsDisabled(true);
-  sendProgressBuffer = "";
+  setProgressActive("send", true);
+  resetProgress("send");
+  streamBuffers.set("send", "");
+  streamBuffers.set("send-err", "");
   setResult(ui.sendResult, t("resultSending"));
   await waitForNextFrame();
 
@@ -846,8 +1103,12 @@ ui.sendForm.addEventListener("submit", async (event) => {
     const output = await invoke("send_file", { request });
     const resultMessage = t("resultSendDone", { code: output.code });
     setResult(ui.sendResult, resultMessage);
+    setProgress("send", 100, t("alertSendDone"), true);
+    queueProgressReset("send");
     await showPopup(t("alertSendDone"), "success");
   } catch (err) {
+    setProgressActive("send", false);
+    resetProgress("send");
     const message = toErrorMessage(err);
     setResult(ui.sendResult, message, true);
     await showPopup(message, "error");
@@ -868,7 +1129,8 @@ async function bootstrap() {
     if (!isObject(payload)) {
       return;
     }
-    appendLog(payload.stream ?? "log", payload.line ?? "");
+    const stream = payload.stream === "stderr" ? "recv-err" : "recv";
+    processLogLine(stream, payload.line ?? "");
   });
 
   await listen("listen-state", (event) => {
@@ -886,7 +1148,7 @@ async function bootstrap() {
     }
 
     const path = typeof payload.path === "string" ? payload.path : "";
-    const from = typeof payload.from === "string" && payload.from.trim() ? payload.from : "unknown";
+    const from = formatPeerAddress(payload.from);
     const size = formatBytes(payload.size);
     const name = basenameFromPath(path || "unknown");
 
@@ -927,14 +1189,11 @@ async function bootstrap() {
     const stream = payload.stream === "stderr" ? "send-err" : "send";
     const chunk = typeof payload.chunk === "string" ? payload.chunk : "";
     if (!chunk) {
+      flushStreamBuffer(stream);
       return;
     }
 
     appendChunkToLog(stream, chunk);
-    const latest = readLatestSendProgress(chunk);
-    if (latest && stream === "send") {
-      setResult(ui.sendResult, latest);
-    }
   });
 
   await ensureDefaultOutputDirectory();

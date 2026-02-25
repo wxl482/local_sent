@@ -95,6 +95,14 @@ interface PairingState {
   activeTransfers: number;
 }
 
+interface ProgressEmitState {
+  prefix: string;
+  totalBytes: number;
+  startedAt: number;
+  lastEmitAt: number;
+  lastPercent: number;
+}
+
 class SocketReader {
   private buffer = Buffer.alloc(0);
   private ended = false;
@@ -460,6 +468,7 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
   let requiredPairCodeForThisTransfer: string | null = null;
   const hasher = createHash("sha256");
   const startedAt = Date.now();
+  const remoteAddress = normalizeRemoteAddress(socket.remoteAddress);
 
   const fail = async (message: string, cleanup = false): Promise<void> => {
     if (failed) {
@@ -533,7 +542,7 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
 
     if (listenOptions.confirmTransfer) {
       const decision = await listenOptions.confirmTransfer({
-        from: socket.remoteAddress ?? "unknown",
+        from: remoteAddress,
         relativePath: header.relativePath,
         fileSize: header.fileSize
       });
@@ -555,6 +564,7 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
       hasher
     });
     received = resumedFrom;
+    const recvProgressState = createProgressEmitState(`[recv ${header.relativePath}]`, header.fileSize, startedAt);
 
     if (resumedFrom < header.fileSize) {
       fileStream = createWriteStream(targetPath, resumedFrom > 0 ? { flags: "r+", start: resumedFrom } : { flags: "w" });
@@ -584,7 +594,7 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
         header,
         fileStream,
         hasher,
-        startedAt,
+        progressState: recvProgressState,
         receivedRef: {
           get: () => received,
           set: (v: number) => {
@@ -621,6 +631,7 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
       nextPairCode = pairingState.currentCode ?? undefined;
     }
 
+    emitProgress(recvProgressState, received, true);
     process.stdout.write("\n");
     socket.end(
       encodeJsonLine({
@@ -640,6 +651,17 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
     reader.dispose();
     pairingState.activeTransfers = Math.max(0, pairingState.activeTransfers - 1);
   }
+}
+
+function normalizeRemoteAddress(raw: string | undefined): string {
+  const value = String(raw ?? "").trim();
+  if (!value) {
+    return "unknown";
+  }
+  if (value.startsWith("::ffff:")) {
+    return value.slice("::ffff:".length);
+  }
+  return value;
 }
 
 async function decideResumeOffset(args: {
@@ -685,6 +707,35 @@ async function decideResumeOffset(args: {
   return existingStat.size;
 }
 
+const PROGRESS_EMIT_INTERVAL_MS = 80;
+const PROGRESS_EMIT_DELTA_PERCENT = 0.35;
+
+function createProgressEmitState(prefix: string, totalBytes: number, startedAt: number): ProgressEmitState {
+  return {
+    prefix,
+    totalBytes,
+    startedAt,
+    lastEmitAt: 0,
+    lastPercent: -1
+  };
+}
+
+function emitProgress(state: ProgressEmitState, transferredBytes: number, force = false): void {
+  const now = Date.now();
+  const total = Math.max(0, state.totalBytes);
+  const ratio = total === 0 ? 100 : (transferredBytes / total) * 100;
+  const safePercent = Math.max(0, Math.min(100, ratio));
+  const percentDelta = Math.abs(safePercent - state.lastPercent);
+
+  if (!force && now - state.lastEmitAt < PROGRESS_EMIT_INTERVAL_MS && percentDelta < PROGRESS_EMIT_DELTA_PERCENT) {
+    return;
+  }
+
+  state.lastEmitAt = now;
+  state.lastPercent = safePercent;
+  process.stdout.write(`\r${renderProgress(state.prefix, transferredBytes, total, state.startedAt)}`);
+}
+
 async function streamFileRange(args: {
   socket: Socket;
   filePath: string;
@@ -695,6 +746,7 @@ async function streamFileRange(args: {
   const { socket, filePath, startOffset, totalBytes, label } = args;
   const startedAt = Date.now();
   let sent = startOffset;
+  const progressState = createProgressEmitState(`[send ${label}]`, totalBytes, startedAt);
   const stream = createReadStream(filePath, { start: startOffset });
 
   await new Promise<void>((resolve, reject) => {
@@ -707,7 +759,7 @@ async function streamFileRange(args: {
     stream.on("error", onError);
     stream.on("data", (chunk: Buffer) => {
       sent += chunk.length;
-      process.stdout.write(`\r${renderProgress(`[send ${label}]`, sent, totalBytes, startedAt)}`);
+      emitProgress(progressState, sent);
 
       const writable = socket.write(chunk);
       if (!writable) {
@@ -716,6 +768,7 @@ async function streamFileRange(args: {
       }
     });
     stream.on("end", () => {
+      emitProgress(progressState, sent, true);
       process.stdout.write("\n");
       socket.removeListener("error", onError);
       resolve();
@@ -728,10 +781,10 @@ async function writePayload(args: {
   header: TransferHeader;
   fileStream: WriteStream | null;
   hasher: ReturnType<typeof createHash>;
-  startedAt: number;
+  progressState: ProgressEmitState;
   receivedRef: { get: () => number; set: (next: number) => void };
 }): Promise<void> {
-  const { payload, header, fileStream, hasher, startedAt, receivedRef } = args;
+  const { payload, header, fileStream, hasher, progressState, receivedRef } = args;
   if (payload.length === 0) {
     return;
   }
@@ -748,7 +801,7 @@ async function writePayload(args: {
   hasher.update(payload);
   receivedRef.set(nextReceived);
   const writable = fileStream.write(payload);
-  process.stdout.write(`\r${renderProgress(`[recv ${header.relativePath}]`, nextReceived, header.fileSize, startedAt)}`);
+  emitProgress(progressState, nextReceived);
   if (!writable) {
     await once(fileStream, "drain");
   }
