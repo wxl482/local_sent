@@ -68,7 +68,7 @@ jobs:
         run: npm run release:current
 
       - name: Inspect release outputs
-        run: ls -la release
+        run: node -e "const fs=require('fs');const p='release';if(!fs.existsSync(p)){console.error('release dir not found');process.exit(1);}for(const name of fs.readdirSync(p)){const stat=fs.statSync(`${p}/${name}`);console.log(`${stat.isDirectory()?'[dir]':'[file]'} ${name}`);}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
