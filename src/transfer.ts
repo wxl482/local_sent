@@ -546,7 +546,8 @@ async function handleIncomingSocket(socket: Socket, outputDir: string, pairingSt
     const receivePathSelection = await selectReceivePaths({
       outputDir,
       relativePath: header.relativePath,
-      expectedSha256: header.sha256
+      expectedSha256: header.sha256,
+      expectedSize: header.fileSize
     });
     targetPath = receivePathSelection.finalPath;
     tempPath = receivePathSelection.tempPath;
@@ -712,8 +713,9 @@ async function selectReceivePaths(args: {
   outputDir: string;
   relativePath: string;
   expectedSha256: string;
+  expectedSize: number;
 }): Promise<ReceivePathSelection> {
-  const { outputDir, relativePath, expectedSha256 } = args;
+  const { outputDir, relativePath, expectedSha256, expectedSize } = args;
   const basePath = resolveOutputPath(outputDir, relativePath);
 
   for (let index = 0; index < MAX_DUPLICATE_SUFFIX_ATTEMPTS; index += 1) {
@@ -733,12 +735,30 @@ async function selectReceivePaths(args: {
         tempPath: candidateTempPath
       };
     }
+
+    if (
+      await shouldReuseExistingReceivePath({
+        targetPath: candidateFinalPath,
+        expectedSize,
+        expectedSha256
+      })
+    ) {
+      return {
+        finalPath: candidateFinalPath,
+        // Continue writing into the existing file directly so resume offset can be preserved.
+        tempPath: candidateFinalPath
+      };
+    }
   }
 
   throw new Error("failed to allocate receive target path");
 }
 
 async function promoteReceivedFile(tempPath: string, preferredFinalPath: string): Promise<string> {
+  if (tempPath === preferredFinalPath) {
+    return preferredFinalPath;
+  }
+
   for (let index = 0; index < MAX_DUPLICATE_SUFFIX_ATTEMPTS; index += 1) {
     const candidateFinalPath = duplicatePathWithIndex(preferredFinalPath, index);
     try {
@@ -762,6 +782,39 @@ async function promoteReceivedFile(tempPath: string, preferredFinalPath: string)
   }
 
   throw new Error("failed to choose final receive file path");
+}
+
+async function shouldReuseExistingReceivePath(args: {
+  targetPath: string;
+  expectedSize: number;
+  expectedSha256: string;
+}): Promise<boolean> {
+  const { targetPath, expectedSize, expectedSha256 } = args;
+
+  let existingStat: Awaited<ReturnType<typeof fsPromises.stat>> | null = null;
+  try {
+    existingStat = await fsPromises.stat(targetPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw err;
+  }
+
+  if (!existingStat.isFile()) {
+    return false;
+  }
+
+  if (existingStat.size < expectedSize) {
+    return true;
+  }
+
+  if (existingStat.size === expectedSize) {
+    const digest = await sha256File(targetPath);
+    return digest === expectedSha256;
+  }
+
+  return false;
 }
 
 async function decideResumeOffset(args: {
